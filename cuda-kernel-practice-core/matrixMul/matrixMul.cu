@@ -4,10 +4,13 @@
 #include <helper_cuda.h>
 #inlcude <helper_functions.h>
 
+// 定义模版参数 BLOCK_SIZE kernel块的大小在编译时确定 后面调用的时候会给出大小
+// wA矩阵A的宽度 wB矩阵B的宽度
 template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, float *B, int wA, int wB){
     int bx = blockIdx.x;
     int by = blockIdx.y;
 
+    // 当前这个线程在小组里面的位置 表示当前这个线程是在block里面第tx行、第ty列的位置
     int tx = threadIdx.x;
     int ty = threadIdx.y;
 
@@ -18,20 +21,21 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
 
     int bBegin = BLOCK_SIZE * bx;
     int bStep = BLOCK_SIZE * wB;
-
+    // 记录算出来的C的结果
     float Csub = 0;
     for(int a = aBegin,b=bBegin; a <= aEnd; a += aStep, b += bStep){
         // 共享数组大小必须在编译期确定
+        // block内部的共享内存
         __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
-
         __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
         As[ty][tx] = A[a + wA * ty + tx];
         Bs[ty][tx] = B[b + wB * ty + tx];
-
+        // 所有线程需要同步等待结果
         __syncthreads();
 
 #pragma unroll
+        // 矩阵运算
         for(int k = 0;k < BLOCK_SIZE;++k){
             Csub += As[ty][k] * Bs[k][tx];
         }
@@ -52,7 +56,7 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     unsigned int size_A = dimsA.x * dimsA.y;
     unsigned int mem_size_A = sizeof(float) * size_A;
     float *h_A;
-    // CPU 申请显存
+    // CPU 申请内存
     // CUDA 申请页锁定主机内存 CPU端内存
     // 这里提高CPU-GPU数据拷贝速度 支持真正的异步拷贝
     checkCudaErrors(cudaMallocHost(&h_A, mem_size_A));
@@ -66,7 +70,7 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     const float valB = 0.01f;
     ConstantInit(h_A, size_A, 1.0f);
     ConstantInit(h_B, size_B, valB);
-    // *d_A, *d_B, *d_C 保存的是GPU显存的地址
+    // d_A, d_B, d_C 保存的是GPU显存的地址
     float *d_A, *d_B, *d_C;
     dim3 dimsC(dimsB.x, dimsA.y, 1);
     unsigned int mem_size_C = dimsC.x * dimsC.y * sizeof(float);
