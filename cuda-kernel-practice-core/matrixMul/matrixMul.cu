@@ -17,13 +17,16 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
     int ty = threadIdx.y;
     // 计算A矩阵的起点 当前block在第by行小块
     // A的起始行是 BLOCK_SIZE * by
-    // 一行有
+    // 一行有 wA 个threads
+    // 所以起始位置是 wA * BLOCK_SIZE * by
     int aBegin = wA * BLOCK_SIZE * by;
+    // 当前block下 从开头到结尾
     int aEnd = aBegin + wA - 1;
 
     int aStep = BLOCK_SIZE;
 
     int bBegin = BLOCK_SIZE * bx;
+    // 这里是和a的方式不一样 因为是行和列有不同
     int bStep = BLOCK_SIZE * wB;
     // 记录算出来的C的结果
     float Csub = 0;
