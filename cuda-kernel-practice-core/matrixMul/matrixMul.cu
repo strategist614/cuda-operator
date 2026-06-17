@@ -60,12 +60,13 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     unsigned int mem_size_B = sizeof(float) * size_B;
     float *h_B;
     checkCudaErrors(cudaMallocHost(&h_B, mem_size_B));
+    // GPU的任务队列
     cudaStream_t stream;
 
     const float valB = 0.01f;
     ConstantInit(h_A, size_A, 1.0f);
     ConstantInit(h_B, size_B, valB);
-
+    // *d_A, *d_B, *d_C 保存的是GPU显存的地址
     float *d_A, *d_B, *d_C;
     dim3 dimsC(dimsB.x, dimsA.y, 1);
     unsigned int mem_size_C = dimsC.x * dimsC.y * sizeof(float);
@@ -78,7 +79,8 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     }
     // GPU上面申请显存
     // cudaError_t cudaMalloc(void **devPtr, size_t size) reinterpret_cast 需要做类型的强制转换
-    
+    // 把 d_A 变量的地址给cudaMalloc函数 可以往里面写GPU地址
+    // 因为 d_A 本身的类型是 float * 所以&A 就是 float **
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_A), mem_size_A));
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_B), mem_size_B));
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_C), mem_size_C));
@@ -89,6 +91,7 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
 
     checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
+    // 把 h_A 从 CPU 拷贝到 GPU 的 d_A
     checkCudaErrors(cudaMemcpyAsync(d_A, h_A, mem_size_A, cudaMemcpyHostToDevice, stream));
     checkCudaErrors(cudaMemcpyAsync(d_B, h_B, mem_size_B, cudaMemcpyHostToDevice, stream));
 
