@@ -7,13 +7,17 @@
 // 定义模版参数 BLOCK_SIZE kernel块的大小在编译时确定 后面调用的时候会给出大小
 // wA矩阵A的宽度 wB矩阵B的宽度
 template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, float *B, int wA, int wB){
+    // 当前这个block负责矩阵C的第几列小块
     int bx = blockIdx.x;
+    // 当前这个block负责矩阵C的第几行小块
     int by = blockIdx.y;
 
-    // 当前这个线程在小组里面的位置 表示当前这个线程是在block里面第tx行、第ty列的位置
+    // 当前这个线程在小组里面的位置 表示当前这个线程是在block里面第tx列、第ty行的位置
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-
+    // 计算A矩阵的起点 当前block在第by行小块
+    // A的起始行是 BLOCK_SIZE * by
+    // 一行有
     int aBegin = wA * BLOCK_SIZE * by;
     int aEnd = aBegin + wA - 1;
 
