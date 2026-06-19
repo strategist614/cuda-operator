@@ -110,6 +110,8 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
 
     // 把 h_A 从 CPU 拷贝到 GPU 的 d_A
     // 把这个拷贝任务放入 stream 中
+    // 这个是异步的 CPU 不会等待拷贝任务做完 而是会继续往下执行
+    // CPU不等待GPU GPU无法知道任务顺序 所以将这个拷贝任务加入了stream队列中
     checkCudaErrors(cudaMemcpyAsync(d_A, h_A, mem_size_A, cudaMemcpyHostToDevice, stream));
     checkCudaErrors(cudaMemcpyAsync(d_B, h_B, mem_size_B, cudaMemcpyHostToDevice, stream));
 
