@@ -49,7 +49,9 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
         }
         __syncthreads();
     }
+    // 还原真正的C矩阵的位置
     int c = wB * BLOCK_SIZE * by + BLOCK_SIZE * bx;
+    // 当前block的起点+当前thread在小块里面位置
     C[c + wB * ty + tx] = Csub;
 }
 
