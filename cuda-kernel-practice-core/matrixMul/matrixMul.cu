@@ -1,8 +1,8 @@
 #include <cuda_profiler_api.h>
-#inlcude <cuda_runtime.h>
+#include <cuda_runtime.h>
 
 #include <helper_cuda.h>
-#inlcude <helper_functions.h>
+#include <helper_functions.h>
 
 // 定义模版参数 BLOCK_SIZE kernel块的大小在编译时确定 后面调用的时候会给出大小
 // wA矩阵A的宽度 wB矩阵B的宽度
@@ -22,11 +22,11 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
     int aBegin = wA * BLOCK_SIZE * by;
     // 当前block下 从开头到结尾
     int aEnd = aBegin + wA - 1;
-
+    // A的block是横着移动的 每次移动一个block的大小
     int aStep = BLOCK_SIZE;
-
+    // 
     int bBegin = BLOCK_SIZE * bx;
-    // 这里是和a的方式不一样 因为是行和列有不同
+    // 这里是和a的方式不一样 因为是行和列有不同 因为取的是列 所以每往下一行就要加个 BLOCK_SIZE
     int bStep = BLOCK_SIZE * wB;
     // 记录算出来的C的结果
     float Csub = 0;
@@ -35,7 +35,8 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
         // block内部的共享内存
         __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
         __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
-
+        // 这里ty tx是每个线程的处理 也就是C矩阵的一个元素值
+        // 又因为As Bs是block共享内存 所以这里也是在多线程的往矩阵里面填数据
         As[ty][tx] = A[a + wA * ty + tx];
         Bs[ty][tx] = B[b + wB * ty + tx];
         // 所有线程需要同步等待结果
