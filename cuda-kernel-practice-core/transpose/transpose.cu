@@ -62,7 +62,6 @@ __global__ void transposNaive(float *odata, float *idata, int width, int height)
 
 __global__ void transposeCoalesced(float *odata, float *idata, int width, int height)
 {
-    // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
@@ -87,7 +86,6 @@ __global__ void transposeCoalesced(float *odata, float *idata, int width, int he
 
 __global__ void transposeNoBankConflicts(float *odata, float *idata, int width, int height)
 {
-    // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float tile[TILE_DIM][TILE_DIM + 1];
 
@@ -112,13 +110,11 @@ __global__ void transposeNoBankConflicts(float *odata, float *idata, int width, 
 
 __global__ void transposeDiagonal(float *odata, float *idata, int width, int height)
 {
-    // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float tile[TILE_DIM][TILE_DIM + 1];
 
     int blockIdx_x, blockIdx_y;
 
-    // do diagonal reordering
     if (width == height) {
         blockIdx_y = blockIdx.x;
         blockIdx_x = (blockIdx.x + blockIdx.y) % gridDim.x;
@@ -128,9 +124,6 @@ __global__ void transposeDiagonal(float *odata, float *idata, int width, int hei
         blockIdx_y = bid % gridDim.y;
         blockIdx_x = ((bid / gridDim.y) + blockIdx_y) % gridDim.x;
     }
-
-    // from here on the code is same as previous kernel except blockIdx_x replaces
-    // blockIdx.x and similarly for y
 
     int xIndex   = blockIdx_x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx_y * TILE_DIM + threadIdx.y;
@@ -153,7 +146,6 @@ __global__ void transposeDiagonal(float *odata, float *idata, int width, int hei
 
 __global__ void transposeFineGrained(float *odata, float *idata, int width, int height)
 {
-    // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float block[TILE_DIM][TILE_DIM + 1];
 
@@ -174,7 +166,6 @@ __global__ void transposeFineGrained(float *odata, float *idata, int width, int 
 
 __global__ void transposeCoarseGrained(float *odata, float *idata, int width, int height)
 {
-    // Handle to thread block group
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float block[TILE_DIM][TILE_DIM + 1];
 
@@ -208,8 +199,6 @@ void computeTransposeGold(float *gold, float *idata, const int size_x, const int
 
 void getParams(int argc, char **argv, cudaDeviceProp &deviceProp, int &size_x, int &size_y, int max_tile_dim)
 {
-    // set matrix size (if (x,y) dim of matrix is not square, then this will have
-    // to be modified
     if (checkCmdLineFlag(argc, (const char **)argv, "dimX")) {
         size_x = getCmdLineArgumentInt(argc, (const char **)argv, "dimX");
 
@@ -250,13 +239,8 @@ void showHelp()
     printf("\t-dimY=col_dim_size (matrix column dimensions)\n");
 }
 
-// ----
-// main
-// ----
-
 int main(int argc, char **argv)
 {
-    // Start logs
     printf("%s Starting...\n\n", sSDKsample);
 
     if (checkCmdLineFlag(argc, (const char **)argv, "help")) {
@@ -264,14 +248,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    int            devID = findCudaDevice(argc, (const char **)argv);
+    int devID = findCudaDevice(argc, (const char **)argv);
     cudaDeviceProp deviceProp;
 
-    // get number of SMs on this GPU
     checkCudaErrors(cudaGetDevice(&devID));
     checkCudaErrors(cudaGetDeviceProperties(&deviceProp, devID));
 
-    // compute the scaling factor (for GPUs with fewer MPs)
     float scale_factor, total_tiles;
     scale_factor = max(
         (192.0f / (_ConvertSMVer2Cores(deviceProp.major, deviceProp.minor) * (float)deviceProp.multiProcessorCount)),
@@ -280,16 +262,13 @@ int main(int argc, char **argv)
     printf("> Device %d: \"%s\"\n", devID, deviceProp.name);
     printf("> SM Capability %d.%d detected:\n", deviceProp.major, deviceProp.minor);
 
-    // Calculate number of tiles we will run for the Matrix Transpose performance
-    // tests
     int size_x, size_y, max_matrix_dim, matrix_size_test;
 
-    matrix_size_test = 512; // we round down max_matrix_dim for this perf test
+    matrix_size_test = 512; 
     total_tiles      = (float)MAX_TILES / scale_factor;
 
     max_matrix_dim = FLOOR((int)(floor(sqrt(total_tiles)) * TILE_DIM), matrix_size_test);
 
-    // This is the minimum size allowed
     if (max_matrix_dim == 0) {
         max_matrix_dim = matrix_size_test;
     }
@@ -302,8 +281,6 @@ int main(int argc, char **argv)
 
     printf("> Compute performance scaling factor = %4.2f\n", scale_factor);
 
-    // Extract parameters if there are any, command line -dimx and -dimy can
-    // override any of these settings
     getParams(argc, argv, deviceProp, size_x, size_y, max_matrix_dim);
 
     if (size_x != size_y) {
@@ -322,11 +299,9 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    // kernel pointer and descriptor
     void (*kernel)(float *, float *, int, int);
     const char *kernelName;
 
-    // execution configuration parameters
     dim3 grid(size_x / TILE_DIM, size_y / TILE_DIM), threads(TILE_DIM, BLOCK_ROWS);
 
     if (grid.x < 1 || grid.y < 1) {
@@ -334,10 +309,8 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    // CUDA events
     cudaEvent_t start, stop;
 
-    // size of memory required to store the matrix
     size_t mem_size = static_cast<size_t>(sizeof(float) * size_x * size_y);
 
     if (2 * mem_size > deviceProp.totalGlobalMem) {
@@ -346,29 +319,23 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    // allocate host memory
     float *h_idata       = (float *)malloc(mem_size);
     float *h_odata       = (float *)malloc(mem_size);
     float *transposeGold = (float *)malloc(mem_size);
     float *gold;
 
-    // allocate device memory
     float *d_idata, *d_odata;
     checkCudaErrors(cudaMalloc((void **)&d_idata, mem_size));
     checkCudaErrors(cudaMalloc((void **)&d_odata, mem_size));
 
-    // initialize host data
     for (int i = 0; i < (size_x * size_y); ++i) {
         h_idata[i] = (float)i;
     }
 
-    // copy host data to device
     checkCudaErrors(cudaMemcpy(d_idata, h_idata, mem_size, cudaMemcpyHostToDevice));
 
-    // Compute reference transpose solution
     computeTransposeGold(transposeGold, h_idata, size_x, size_y);
 
-    // print out common data for all kernels
     printf("\nMatrix size: %dx%d (%dx%d tiles), tile size: %dx%d, block size: "
            "%dx%d\n\n",
            size_x,
@@ -380,18 +347,12 @@ int main(int argc, char **argv)
            TILE_DIM,
            BLOCK_ROWS);
 
-    // initialize events
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&stop));
-
-    //
-    // loop over different kernels
-    //
 
     bool success = true;
 
     for (int k = 0; k < 8; k++) {
-        // set kernel pointer
         switch (k) {
         case 0:
             kernel     = &copy;
@@ -434,30 +395,24 @@ int main(int argc, char **argv)
             break;
         }
 
-        // set reference solution
         if (kernel == &copy || kernel == &copySharedMem) {
             gold = h_idata;
         }
         else if (kernel == &transposeCoarseGrained || kernel == &transposeFineGrained) {
-            gold = h_odata; // fine- and coarse-grained kernels are not full
-                            // transposes, so bypass check
+            gold = h_odata; 
         }
         else {
             gold = transposeGold;
         }
 
-        // Clear error status
         checkCudaErrors(cudaGetLastError());
 
-        // warmup to avoid timing startup
         kernel<<<grid, threads>>>(d_odata, d_idata, size_x, size_y);
 
-        // take measurements for loop over kernel launches
         checkCudaErrors(cudaEventRecord(start, 0));
 
         for (int i = 0; i < NUM_REPS; i++) {
             kernel<<<grid, threads>>>(d_odata, d_idata, size_x, size_y);
-            // Ensure no launch failure
             checkCudaErrors(cudaGetLastError());
         }
 
@@ -474,7 +429,6 @@ int main(int argc, char **argv)
             success = false;
         }
 
-        // take measurements for loop inside kernel
         checkCudaErrors(cudaMemcpy(h_odata, d_odata, mem_size, cudaMemcpyDeviceToHost));
         res = compareData(gold, h_odata, size_x * size_y, 0.01f, 0.0f);
 
@@ -482,8 +436,6 @@ int main(int argc, char **argv)
             printf("*** %s kernel FAILED ***\n", kernelName);
             success = false;
         }
-
-        // report effective bandwidths
         float kernelBandwidth = 2.0f * 1000.0f * mem_size / (1024 * 1024 * 1024) / (kernelTime / NUM_REPS);
         printf("transpose %s, Throughput = %.4f GB/s, Time = %.5f ms, Size = %u fp32 "
                "elements, NumDevsUsed = %u, Workgroup = %u\n",
@@ -494,30 +446,18 @@ int main(int argc, char **argv)
                1,
                TILE_DIM * BLOCK_ROWS);
 
-        // Reset d_odata to zero before starting the next loop iteration to avoid
-        // carrying over results from previous kernels. Without this reset, residual
-        // data from a prior kernel (e.g., 'copy') could make a subsequent
-        // kernel (e.g., 'copySharedMem') appear correct even if it performs no work,
-        // leading to false positives in compareData.
         for (int i = 0; i < (size_x * size_y); ++i) {
             h_odata[i] = 0;
         }
-        // copy host data to device
+
         checkCudaErrors(cudaMemcpy(d_odata, h_odata, mem_size, cudaMemcpyHostToDevice));
 
-        // Reset d_odata to zero before starting the next loop iteration to avoid
-        // carrying over results from previous kernels. Without this reset, residual
-        // data from a prior kernel (e.g., 'copy') could make a subsequent
-        // kernel (e.g., 'copySharedMem') appear correct even if it performs no work,
-        // leading to false positives in compareData.
         for (int i = 0; i < (size_x * size_y); ++i) {
             h_odata[i] = 0;
         }
-        // copy host data to device
         checkCudaErrors(cudaMemcpy(d_odata, h_odata, mem_size, cudaMemcpyHostToDevice));
     }
 
-    // cleanup
     free(h_idata);
     free(h_odata);
     free(transposeGold);
