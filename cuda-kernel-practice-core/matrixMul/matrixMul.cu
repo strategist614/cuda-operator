@@ -41,12 +41,14 @@ template <int BLOCK_SIZE> __global__ void MatrixMulCUDA(float *C, float *A, floa
         Bs[ty][tx] = B[b + wB * ty + tx];
         // 所有线程需要同步等待结果
         __syncthreads();
-
+// 告诉编译器 下面这个 k 循环 可以展开，尽量优化
 #pragma unroll
         // 矩阵运算
+        // 当前 thread 拿着A的第ty行 拿B的第tx列 一项一项的相乘
         for(int k = 0;k < BLOCK_SIZE;++k){
             Csub += As[ty][k] * Bs[k][tx];
         }
+        // 这里需要同步 不然 As Bs会出现覆盖的问题
         __syncthreads();
     }
     // 还原真正的C矩阵的位置
@@ -74,7 +76,8 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     unsigned int mem_size_B = sizeof(float) * size_B;
     float *h_B;
     checkCudaErrors(cudaMallocHost(&h_B, mem_size_B));
-    // GPU的任务队列
+    // GPU的任务队列 之后的拷贝和kernel都会放到这个队列里面
+    // 保证任务是按顺序执行的
     cudaStream_t stream;
 
     const float valB = 0.01f;
@@ -98,14 +101,15 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_A), mem_size_A));
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_B), mem_size_B));
     checkCudaErrors(cudaMalloc(reinterpret_cast<void **>(&d_C), mem_size_C));
-
+    // 创建CUDA事件 等同于秒表的作用
     cudaEvent_t start, stop;
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&stop));
-
+    // 创建GPU任务队列 不会被默认stream隐式阻塞
     checkCudaErrors(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
     // 把 h_A 从 CPU 拷贝到 GPU 的 d_A
+    // 把这个拷贝任务放入 stream 中
     checkCudaErrors(cudaMemcpyAsync(d_A, h_A, mem_size_A, cudaMemcpyHostToDevice, stream));
     checkCudaErrors(cudaMemcpyAsync(d_B, h_B, mem_size_B, cudaMemcpyHostToDevice, stream));
 
@@ -122,8 +126,10 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
     }
 
     printf("done\n");
+    // CPU等待这个 stream 里面的任务做完
+    // 等GPU完成前面的拷贝和第一次kernel
     checkCudaErrors(cudaStreamSynchronize(stream));
-
+    // 开始计时
     checkCudaErrors(cudaEventRecord(start, stream));
 
     int nIter = 300;
@@ -137,6 +143,7 @@ int MatrixMultiply(int argc, char **argv, int block_size, const dim3 &dimsA, con
         }
     }
     checkCudaErrors(cudaEventRecord(stop, stream));
+    // CPU等待 stop 完成
     checkCudaErrors(cudaEventSynchronize(stop));
 
     float msecTotal = 0.0f;
@@ -237,7 +244,7 @@ int main(int argc, char **argv)
     }
 
     printf("MatrixA(%d,%d), MatrixB(%d,%d)\n", dimsA.x, dimsA.y, dimsB.x, dimsB.y);
-
+    // profiler是性能采样工具 这里是采样开始
     checkCudaErrors(cudaProfilerStart());
     int matrix_result = MatrixMultiply(argc, argv, block_size, dimsA, dimsB);
     checkCudaErrors(cudaProfilerStop());
