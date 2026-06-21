@@ -1,3 +1,7 @@
+/*
+    输入矩阵 idata
+    输出矩阵 odata
+*/
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
@@ -8,7 +12,9 @@ namespace cg = cooperative_groups;
 
 const char *sSDKsample = "Transpose";
 
+// 每个block处理一个 32 * 32 的矩阵小块 tile
 #define TILE_DIM 32
+// 但是每个 block 只有 32 * 16 的线程
 #define BLOCK_ROWS 16
 
 int MATRIX_SIZE_X = 1024;
@@ -28,11 +34,12 @@ __global__ void copy(float *odata, float *idata, int width, int height){
     int index = xIndex + width * yIndex;
 
     for(int i = 0;i < TILE_DIM; i += BLOCK_ROWS){
-        odata[index + i * width] = idata[index + i * width]
+        odata[index + i * width] = idata[index + i * width];
     }
 }
 
-__global__ void copySharedMem(float *odata, float *idata, int width, int height){
+__global__ void copySharedMem(float *odata, float *idata, int width, int height)
+{
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
@@ -41,15 +48,24 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 
     int index = xIndex + width * yIndex;
 
-    for(itn i = 0;i < TILE_DIM; i+= BLOCK_ROWS){
-        if(xIndex < width && yIndex < height){
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+        if (xIndex < width && yIndex < height) {
+            tile[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
+            tile[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
+        }
+    }
+
+    cg::sync(cta);
+
+    for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
+        if (xIndex < height && yIndex < width) {
             odata[index + i * width] = tile[threadIdx.y + i][threadIdx.x];
             odata[index + i * width] = tile[threadIdx.y + i][threadIdx.x];
         }
     }
 }
 
-__global__ void transposNaive(float *odata, float *idata, int width, int height){
+__global__ void transposeNaive(float *odata, float *idata, int width, int height){
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
 
