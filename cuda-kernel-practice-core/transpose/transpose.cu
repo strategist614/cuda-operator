@@ -82,6 +82,7 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 }
 /*
 同一个 warp 里面的 32 个线程同时访问的地址是不是挨在一起
+Naive的转置会使得访问不连续
 */
 
 __global__ void transposeNaive(float *odata, float *idata, int width, int height){
@@ -93,20 +94,28 @@ __global__ void transposeNaive(float *odata, float *idata, int width, int height
     // 计算转置后的输出矩阵的物理位置
     int index_out = yIndex + height * xIndex;
     for(int i = 0;i < TILE_DIM;i += BLOCK_ROWS){
-        // 转置之前行相差 i 行 转置之后也是
+        // 转置之前行相差 i 行 转置之后也是 导致写回不连续 差了 i
         odata[index_out + i] = idata[index_in + i * width];
     }
 }
 
+/*
+合并访存
+在 shared memory 里面完成转置 再连续写回 global memory
+*/
 __global__ void transposeCoalesced(float *odata, float *idata, int width, int height)
 {
     cg::thread_block cta = cg::this_thread_block();
+    // 申请 shared memory 属于当前的 block
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
     int xIndex   = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex   = blockIdx.y * TILE_DIM + threadIdx.y;
     int index_in = xIndex + (yIndex)*width;
-
+    // 重新计算输出位置
+    // 原来是读 (blockIdx.x, blockIdx.y) 块
+    // 现在是读 (blockIdx.y, blockIdx.x) 块
+    // 通过修改输出矩阵的物理地址 使得写入是连续的
     xIndex        = blockIdx.y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx.x * TILE_DIM + threadIdx.y;
     int index_out = xIndex + (yIndex)*height;
@@ -114,9 +123,9 @@ __global__ void transposeCoalesced(float *odata, float *idata, int width, int he
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         tile[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
     }
-
+    // 同步一下 防止线程读取数据有误
     cg::sync(cta);
-
+    // 在 shared memory tile 中负责转置
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         odata[index_out + i * height] = tile[threadIdx.x][threadIdx.y + i];
     }
