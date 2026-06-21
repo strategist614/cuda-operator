@@ -1,6 +1,7 @@
 /*
     输入矩阵 idata
     输出矩阵 odata
+    具体操作 转置
 */
 #include <cooperative_groups.h>
 
@@ -9,30 +10,42 @@ namespace cg = cooperative_groups;
 #include <helper_cuda.h>
 #include <helper_image.h>
 #include <helper_string.h>
-
+// 打印信息用的
 const char *sSDKsample = "Transpose";
 
 // 每个block处理一个 32 * 32 的矩阵小块 tile
 #define TILE_DIM 32
-// 但是每个 block 只有 32 * 16 的线程
+// 但是每个 block 只有 32 * 16 的线程 每个线程会处理两个元素
 #define BLOCK_ROWS 16
-
+// 默认矩阵大小 1024 * 1024
 int MATRIX_SIZE_X = 1024;
 int MATRIX_SIZE_Y = 1024;
 int MUL_FACTOR    = TILE_DIM;
-
+// a向下取整到b的倍数
 #define FLOOR(a, b) (a - (a % b))
-
+// 得到最多有多少个矩阵小块 tile 
+// 例如：1024 * 1024 / (32 * 32) = 1024
 int MAX_TILES = (FLOOR(MATRIX_SIZE_X, 512) * FLOOR(MATRIX_SIZE_Y, 512)) / (TILE_DIM * TILE_DIM);
-
+// 每个kernel循环100次
 #define NUM_REPS 100
-
+/*
+    odata 输出数组
+    idata 输入数组
+    width 矩阵宽度
+    height 矩阵高度
+*/
 __global__ void copy(float *odata, float *idata, int width, int height){
+    // block.x block.y 都取决于后面的 threads(TILE_DIM, BLOCK_ROWS)声明出来的
+    // 计算当前进程负责的列
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
+    // 计算当前进程负责的行
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
-
+    // 将二维坐标转换为一维数组下标
     int index = xIndex + width * yIndex;
-
+    // 循环处理一个 TILE 里面的多行
+    // 每个线程处理两行
+    // 这里其实原来应该是也是循环的 但是使用了线程就让它并发了
+    // index + i * width 是两个一起部分处理的 例如 (0,0)和(16,0)是一起被复制的
     for(int i = 0;i < TILE_DIM; i += BLOCK_ROWS){
         odata[index + i * width] = idata[index + i * width];
     }
@@ -40,12 +53,15 @@ __global__ void copy(float *odata, float *idata, int width, int height){
 
 __global__ void copySharedMem(float *odata, float *idata, int width, int height)
 {
+    // 获取当前 block
     cg::thread_block cta = cg::this_thread_block();
+    // 定义一个 shared memory 数组
     __shared__ float tile[TILE_DIM][TILE_DIM];
-
+    // 计算当前进程负责的列
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
+    // 计算当前进程负责的行
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
-
+    // 计算物理上放置的一维下标
     int index = xIndex + width * yIndex;
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
@@ -54,7 +70,7 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
             tile[threadIdx.y + i][threadIdx.x] = idata[index + i * width];
         }
     }
-
+    // 同步当前 block 内的所有线程
     cg::sync(cta);
 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
