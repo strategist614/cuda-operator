@@ -80,14 +80,20 @@ __global__ void copySharedMem(float *odata, float *idata, int width, int height)
         }
     }
 }
+/*
+同一个 warp 里面的 32 个线程同时访问的地址是不是挨在一起
+*/
 
 __global__ void transposeNaive(float *odata, float *idata, int width, int height){
+    // 计算这个线程的负责的列行坐标
     int xIndex = blockIdx.x * TILE_DIM + threadIdx.x;
     int yIndex = blockIdx.y * TILE_DIM + threadIdx.y;
-
+    // 计算输入矩阵的物理位置
     int index_in = xIndex + width * yIndex;
+    // 计算转置后的输出矩阵的物理位置
     int index_out = yIndex + height * xIndex;
     for(int i = 0;i < TILE_DIM;i += BLOCK_ROWS){
+        // 转置之前行相差 i 行 转置之后也是
         odata[index_out + i] = idata[index_in + i * width];
     }
 }
