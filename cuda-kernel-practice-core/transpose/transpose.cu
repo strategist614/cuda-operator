@@ -116,6 +116,7 @@ __global__ void transposeCoalesced(float *odata, float *idata, int width, int he
     // 原来是读 (blockIdx.x, blockIdx.y) 块
     // 现在是读 (blockIdx.y, blockIdx.x) 块
     // 通过修改输出矩阵的物理地址 使得写入是连续的
+    // tile的大块换了位置 但是内部的元素还没有转置 后面还要利用tile来进行转置
     xIndex        = blockIdx.y * TILE_DIM + threadIdx.x;
     yIndex        = blockIdx.x * TILE_DIM + threadIdx.y;
     int index_out = xIndex + (yIndex)*height;
