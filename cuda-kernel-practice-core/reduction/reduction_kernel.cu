@@ -97,7 +97,7 @@ template <class T> __global__ void reduce0(T *g_idata, T *g_odata, unsigned int 
 
         cg::sync(cta);
     }
-
+    // 足后 lane0 输出结果到 global memory
     if (tid == 0)
         g_odata[blockIdx.x] = sdata[0];
 }

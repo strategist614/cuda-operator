@@ -107,3 +107,12 @@ maskLength = (maskLength > 0) ? (32 - maskLength) : maskLength;
 const unsigned int mask = (0xffffffff) >> maskLength;
 ```
 
+### reduce0
+
+低效原因：
+
+* 用了 `%` 取模
+* 活跃线程是间隔分布的
+  每轮的`warp`利用率很低
+
+`GPU` 上一个 `warp` 的 `32` 个线程通常是一起执行同一条指令
