@@ -184,3 +184,27 @@ tile[31][0] -> 992 % 32 = bank 0
 这个优化主要是老 `CUDA sample` 里针对某些架构的优化。
 
 在现代 `GPU` 上，`memory partition` 和 `cache` 设计更复杂，`diagonal` 的收益不一定总是明显。
+
+#### BLOCK GRID
+
+```
+Grid：整个矩阵
+
+┌─────────┬─────────┬─────────┬─────────┐
+│ Block00 │ Block01 │ Block02 │ Block03 │
+├─────────┼─────────┼─────────┼─────────┤
+│ Block10 │ Block11 │ Block12 │ Block13 │
+├─────────┼─────────┼─────────┼─────────┤
+│ Block20 │ Block21 │ Block22 │ Block23 │
+├─────────┼─────────┼─────────┼─────────┤
+│ Block30 │ Block31 │ Block32 │ Block33 │
+└─────────┴─────────┴─────────┴─────────┘
+
+一个 Block 内部：
+
+thread(0,0)  thread(1,0)  thread(2,0)  ... thread(31,0)
+thread(0,1)  thread(1,1)  thread(2,1)  ... thread(31,1)
+thread(0,2)  thread(1,2)  thread(2,2)  ... thread(31,2)
+...
+thread(0,15) thread(1,15) thread(2,15) ... thread(31,15)
+```
