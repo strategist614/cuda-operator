@@ -134,7 +134,10 @@ __global__ void transposeCoalesced(float *odata, float *idata, int width, int he
 
 __global__ void transposeNoBankConflicts(float *odata, float *idata, int width, int height)
 {
+    // 拿到当前的线程块
     cg::thread_block cta = cg::this_thread_block();
+    // shared memory 多加一列
+    // 多个线程同时访问同一个bank 会导致排队，就会使得访问变慢
     __shared__ float tile[TILE_DIM][TILE_DIM + 1];
 
     int xIndex   = blockIdx.x * TILE_DIM + threadIdx.x;
@@ -148,22 +151,26 @@ __global__ void transposeNoBankConflicts(float *odata, float *idata, int width, 
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         tile[threadIdx.y + i][threadIdx.x] = idata[index_in + i * width];
     }
-
+    // 当前 block 里面的所有线程等一下  
     cg::sync(cta);
-
+    // 按列方向读 shared memory 时，同一个warp的很多线程可能会落到同一个bank 所以加一列
     for (int i = 0; i < TILE_DIM; i += BLOCK_ROWS) {
         odata[index_out + i * height] = tile[threadIdx.x][threadIdx.y + i];
     }
 }
-
+/*
+在 NoBankConflicts 的基础上，额外改变了 block 访问 tile 的顺序
+减少 partition camping显存访问拥挤问题
+*/
 __global__ void transposeDiagonal(float *odata, float *idata, int width, int height)
 {
     cg::thread_block cta = cg::this_thread_block();
     __shared__ float tile[TILE_DIM][TILE_DIM + 1];
-
+    // 重新计算一组 blockIdx.x blockIdx.y 改变 block 和 tile 的对应关系
     int blockIdx_x, blockIdx_y;
-
+    // 方阵情况
     if (width == height) {
+        // 沿对角线处理
         blockIdx_y = blockIdx.x;
         blockIdx_x = (blockIdx.x + blockIdx.y) % gridDim.x;
     }
