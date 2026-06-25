@@ -7,6 +7,7 @@
 
 namespace cg = cooperative_groups;
 
+// 根据模版类型获取动态的 shared memory 指针
 template <class T> struct SharedMemory
 {
     __device__ inline operator T *()
@@ -22,6 +23,7 @@ template <class T> struct SharedMemory
     }
 };
 
+// double 对内存对齐的要求更高 单独写 保证double shared memory对齐更安全
 template <> struct SharedMemory<double>
 {
     __device__ inline operator double *()
@@ -37,36 +39,56 @@ template <> struct SharedMemory<double>
     }
 };
 
+// warp内求和
+// offset = 16: 线程0加线程16，线程1加线程17
+// offset = 8 : 线程0再加线程8
+// 最后输出是 lane 0
 template <class T> __device__ __forceinline__ T warpReduceSum(unsigned int mask, T mySum)
 {
+    // __shfl_down_sync 不经过 shared memory 直接在线程之间交换寄存器数据
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-        mySum += __shfl_down_sync(mask, mySum, offset);
+        mySum += __shfl_down_sync(mask, mySum, offset); 
     }
     return mySum;
 }
-
+// GPU计算能力如果是8.0
 #if __CUDA_ARCH__ >= 800
 
 template <> __device__ __forceinline__ int warpReduceSum<int>(unsigned int mask, int mySum)
 {
+    // 数据类型是 int 不用手写 shuffle 循环 直接使用硬件级别的
     mySum = __reduce_add_sync(mask, mySum);
     return mySum;
 }
 #endif
 
+/*
+所有kerne目标：
+输入：g_idata
+输出：g_odata
+长度：n
+
+1. 每个线程从 global memory 读一个或多个元素
+2. 放入 shared memory 或 mySum
+3. block 内部做归约
+4. block 的 0 号线程写出结果
+*/
 template <class T> __global__ void reduce0(T *g_idata, T *g_odata, unsigned int n)
 {
-
+    // 当前 block
     cg::thread_block cta   = cg::this_thread_block();
+    // 当前 shared memory
     T               *sdata = SharedMemory<T>();
-
+    // 当前线程在 block 里面的编号
     unsigned int tid = threadIdx.x;
+    // 当前线程对应的全局数组的下标
     unsigned int i   = blockIdx.x * blockDim.x + threadIdx.x;
-
+    // 把 global memory 的值搬到 shared memory
+    // 填0是因为不影响加法的总和 还有就是最后一个block可能不满 所以填0
     sdata[tid] = (i < n) ? g_idata[i] : 0;
 
     cg::sync(cta);
-
+    // 多路合并相加 充分利用其并行性
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
 
         if ((tid % (2 * s)) == 0) {
