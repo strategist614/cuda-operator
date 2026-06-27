@@ -116,6 +116,7 @@ template <class T> __global__ void reduce1(T *g_idata, T *g_odata, unsigned int 
     cg::sync(cta);
 
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+        // 减少取模开销
         int index = 2 * s * tid;
 
         if (index < blockDim.x) {
