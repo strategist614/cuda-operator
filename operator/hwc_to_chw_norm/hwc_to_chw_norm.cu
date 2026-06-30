@@ -46,7 +46,6 @@ __global__ void hwc_to_chw_norm_kernel(
 
     // idx 对应 CHW 里面的空间位置 h * W + w
     // HWC 里面一个像素有 3 个通道，所以输入起点是 idx * 3
-    // 
     int in_base = idx * 3;
 
     unsigned char r = input[in_base + 0];
