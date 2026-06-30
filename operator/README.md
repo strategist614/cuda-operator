@@ -99,3 +99,34 @@ warp stall sync 很高
 9. vectorized load/store
 10. 特殊化尺寸
 ```
+
+## profiler
+### Nsight Systems
+整个程序的时间线
+```
+程序整体时间花在哪里？
+CPU 在等 GPU 吗？
+cudaMemcpy 花了多久？
+kernel 之间有没有空隙？
+是不是频繁 launch kernel？
+```
+
+```
+nsys profile 
+```
+### Nsight Compute
+
+某一个 CUDA kernel 的细节
+```
+这个 kernel 内部到底慢在哪里？
+global memory 访问效率怎么样？
+DRAM throughput 多少？
+occupancy 多少？
+warp stall 原因是什么？
+寄存器用了多少？
+shared memory 有没有 bank conflict？
+```
+
+```
+ncu 
+```

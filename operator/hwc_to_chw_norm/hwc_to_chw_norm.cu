@@ -34,27 +34,36 @@ __global__ void hwc_to_chw_norm_kernel(
     float std1,
     float std2
 ) {
+    // 当前第几个像素了 每个线程处理当前哪个像素
+    // 每个线程负责一个像素的三个通道
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     int hw = height * width;
-
+    // 线程数通常会比真实像素多一点
     if (idx >= hw) {
         return;
     }
 
     // idx 对应 CHW 里面的空间位置 h * W + w
     // HWC 里面一个像素有 3 个通道，所以输入起点是 idx * 3
+    // 
     int in_base = idx * 3;
 
     unsigned char r = input[in_base + 0];
     unsigned char g = input[in_base + 1];
     unsigned char b = input[in_base + 2];
-
+    // 强制转换
     float rf = static_cast<float>(r) / 255.0f;
     float gf = static_cast<float>(g) / 255.0f;
     float bf = static_cast<float>(b) / 255.0f;
 
-    // CHW: channel plane 是连续的
+    /*
+        CHW: channel plane 是连续的
+        三个通道是分开存的
+        R 平面: output[0 ... hw-1]
+        G 平面: output[hw ... 2*hw-1]
+        B 平面: output[2*hw ... 3*hw-1]
+    */
     output[0 * hw + idx] = (rf - mean0) / std0;
     output[1 * hw + idx] = (gf - mean1) / std1;
     output[2 * hw + idx] = (bf - mean2) / std2;
