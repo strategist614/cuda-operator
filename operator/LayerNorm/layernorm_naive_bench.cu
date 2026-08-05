@@ -132,7 +132,7 @@ void launch_layernorm_naive(
 ) {
     int block = 256;
     int grid = rows;
-    size_t shared_mem = block * sizeof(float); // 启动 kernel 时分配的共享内存大小
+    size_t shared_mem = block * sizeof(float); // 启动 kernel 时分配的共享内存大小 256 * sizeof(float) = 1024 bytes
 
     layernorm_naive_kernel<<<grid, block, shared_mem>>>(
         d_x,
