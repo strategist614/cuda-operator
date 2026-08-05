@@ -17,8 +17,8 @@ do {                                                                            
 void layernorm_cpu(
     const std::vector<float>& x,
     std::vector<float>& y,
-    const std::vector<float>& gamma,
-    const std::vector<float>& beta,
+    const std::vector<float>& gamma, // 缩放系数
+    const std::vector<float>& beta, // 偏移系数
     int rows,
     int cols,
     float eps
@@ -57,15 +57,15 @@ __global__ void layernorm_naive_kernel(
     int cols,
     float eps
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ float sdata[]; // shared memory
 
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
     if (row >= rows) return;
 
-    const float* x_row = x + row * cols;
-    float* y_row = y + row * cols;
+    const float* x_row = x + row * cols; // 二维排布 定位到当前的线程x
+    float* y_row = y + row * cols; // 定位到当前的线程y
 
     // =========================
     // Step 1: mean
@@ -132,7 +132,7 @@ void launch_layernorm_naive(
 ) {
     int block = 256;
     int grid = rows;
-    size_t shared_mem = block * sizeof(float);
+    size_t shared_mem = block * sizeof(float); // 启动 kernel 时分配的共享内存大小
 
     layernorm_naive_kernel<<<grid, block, shared_mem>>>(
         d_x,
