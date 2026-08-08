@@ -64,14 +64,14 @@ __global__ void layernorm_naive_kernel(
 
     if (row >= rows) return;
 
-    const float* x_row = x + row * cols; // 二维排布 定位到当前的线程x
-    float* y_row = y + row * cols; // 定位到当前的线程y
+    const float* x_row = x + row * cols; // 二维排布 定位到当前的输入元素
+    float* y_row = y + row * cols; // 定位到当前的输出元素
 
     // =========================
     // Step 1: mean
     // =========================
     float sum = 0.0f;
-
+    // 这里是多个
     for (int i = tid; i < cols; i += blockDim.x) {
         sum += x_row[i];
     }
@@ -133,7 +133,8 @@ void launch_layernorm_naive(
     int block = 256;
     int grid = rows;
     size_t shared_mem = block * sizeof(float); // 启动 kernel 时分配的共享内存大小 256 * sizeof(float) = 1024 bytes
-    //
+    // 4096个 blcok 每个block 256个线程 
+    // 256个线程负责1024个元素的计算 每个线程负责 1024/256 = 4 个元素
     layernorm_naive_kernel<<<grid, block, shared_mem>>>(
         d_x,
         d_gamma,
