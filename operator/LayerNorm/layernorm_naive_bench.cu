@@ -71,14 +71,15 @@ __global__ void layernorm_naive_kernel(
     // Step 1: mean
     // =========================
     float sum = 0.0f;
-    // 这里是多个
+    // 这里是多个线程并行计算每一行的均值, 每个线程负责计算一部分元素的和，实际上是跳着计算的
     for (int i = tid; i < cols; i += blockDim.x) {
         sum += x_row[i];
     }
-
+    // 放到共享内存中, 以便后续的归约操作
     sdata[tid] = sum;
+    // 要进行同步 不然 sdata 的值可能还没写完就被其他线程读取了
     __syncthreads();
-
+    // 归约操作, 计算总和
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             sdata[tid] += sdata[tid + stride];
@@ -92,7 +93,7 @@ __global__ void layernorm_naive_kernel(
     // Step 2: variance
     // =========================
     float var_sum = 0.0f;
-
+    // 针对每个线程负责的元素计算方差
     for (int i = tid; i < cols; i += blockDim.x) {
         float diff = x_row[i] - mean;
         var_sum += diff * diff;
@@ -100,7 +101,7 @@ __global__ void layernorm_naive_kernel(
 
     sdata[tid] = var_sum;
     __syncthreads();
-
+    // 归约操作, 计算总和
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             sdata[tid] += sdata[tid + stride];
@@ -135,6 +136,8 @@ void launch_layernorm_naive(
     size_t shared_mem = block * sizeof(float); // 启动 kernel 时分配的共享内存大小 256 * sizeof(float) = 1024 bytes
     // 4096个 blcok 每个block 256个线程 
     // 256个线程负责1024个元素的计算 每个线程负责 1024/256 = 4 个元素
+
+    // 只传入一个 block=256 那么视作 (256, 1, 1) 的线程块, grid=4096 视作 (4096, 1, 1) 的网格
     layernorm_naive_kernel<<<grid, block, shared_mem>>>(
         d_x,
         d_gamma,
