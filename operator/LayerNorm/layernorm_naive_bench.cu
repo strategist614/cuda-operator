@@ -184,7 +184,7 @@ int main() {
     for (size_t i = 0; i < numel; i++) {
         h_x[i] = static_cast<float>((i % 127) - 63) * 0.01f;
     }
-
+    
     for (int i = 0; i < cols; i++) {
         h_gamma[i] = 1.0f + 0.001f * static_cast<float>(i % 13);
         h_beta[i] = 0.01f * static_cast<float>(i % 7);
