@@ -108,13 +108,15 @@ __global__ void layernorm_naive_kernel(
         }
         __syncthreads();
     }
-
+    // 计算出来的方差是所有线程计算的方差和除以列数
     float var = sdata[0] / static_cast<float>(cols);
+    // 计算标准差的倒数, 用于归一化
     float rstd = rsqrtf(var + eps);
 
     // =========================
     // Step 3: normalize + affine
     // =========================
+    // 针对每个线程负责的元素进行归一化和仿射变换
     for (int i = tid; i < cols; i += blockDim.x) {
         float v = x_row[i];
         float norm = (v - mean) * rstd;
