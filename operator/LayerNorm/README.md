@@ -61,3 +61,105 @@ Block 4095  → 负责 row 4095
   }
   ```
   这些数据相加的操作主要是在寄存器之间交换
+
+* 在 `V1` 的 `warp shuffle reduction` 基础上，让每个线程把自己负责的 `4` 个 `x` 一开始读进寄存器，后面 `mean、variance、normalize` 都复用，不再重复访问 `x_row`
+  ```c++
+    __global__ void layernorm_v2_kernel(
+      const float* __restrict__ x,
+      const float* __restrict__ gamma,
+      const float* __restrict__ beta,
+      float* __restrict__ y,
+      int rows,
+      int cols,
+      float eps
+  ) {
+      extern __shared__ float shared[];
+
+      int row = blockIdx.x;
+      int tid = threadIdx.x;
+
+      if (row >= rows) {
+          return;
+      }
+
+      const float* x_row =
+          x + static_cast<size_t>(row) * cols;
+
+      float* y_row =
+          y + static_cast<size_t>(row) * cols;
+
+      // ========================================================
+      // V2 核心优化：
+      // 每个线程一次性把自己负责的 4 个 x 读进寄存器
+      // ========================================================
+
+      float v0 = x_row[tid];
+      float v1 = x_row[tid + 256];
+      float v2 = x_row[tid + 512];
+      float v3 = x_row[tid + 768];
+
+
+      // ========================================================
+      // Step 1: mean
+      // 不再读取 x_row
+      // ========================================================
+
+      float sum =
+          v0 + v1 + v2 + v3;
+
+      float total_sum =
+          block_reduce_sum(sum, shared);
+
+      float mean =
+          total_sum / static_cast<float>(cols);
+
+
+      // ========================================================
+      // Step 2: variance
+      // 继续使用寄存器里的 v0~v3
+      // ========================================================
+
+      float d0 = v0 - mean;
+      float d1 = v1 - mean;
+      float d2 = v2 - mean;
+      float d3 = v3 - mean;
+
+      float var_sum =
+          d0 * d0 +
+          d1 * d1 +
+          d2 * d2 +
+          d3 * d3;
+
+      float total_var_sum =
+          block_reduce_sum(var_sum, shared);
+
+      float var =
+          total_var_sum / static_cast<float>(cols);
+
+      float rstd =
+          rsqrtf(var + eps);
+
+
+      // ========================================================
+      // Step 3: normalize + affine
+      // 仍然使用 v0~v3
+      // ========================================================
+
+      int i0 = tid;
+      int i1 = tid + 256;
+      int i2 = tid + 512;
+      int i3 = tid + 768;
+
+      y_row[i0] =
+          (v0 - mean) * rstd * gamma[i0] + beta[i0];
+
+      y_row[i1] =
+          (v1 - mean) * rstd * gamma[i1] + beta[i1];
+
+      y_row[i2] =
+          (v2 - mean) * rstd * gamma[i2] + beta[i2];
+
+      y_row[i3] =
+          (v3 - mean) * rstd * gamma[i3] + beta[i3];
+  }
+  ```
