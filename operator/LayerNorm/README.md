@@ -46,4 +46,18 @@ Block 4095  → 负责 row 4095
 * 在 `reduction` 那里 每次都需要 `__syncthreads()` 有很多次 `block synchronization`
   所以优化思路是 `warp` 内不需要 `shared memory reduction`
   我现在是 `256` 个 `threads` 一个 `warp` 有 `32` 个 `threads` 所以有 `8` 个 `wraps` 
-  `__shfl_down_sync()` 在 `wrap` 中能直接
+  `__shfl_down_sync()` 在 `wrap` 中能直接做加法。
+  
+  ```c++
+  // warp 的 thread 0 得到 32 个线程的总和
+  __inline__ __device__
+  float warp_reduce_sum(float val)
+  {
+      for (int offset = 16; offset > 0; offset >>= 1) {
+          val += __shfl_down_sync(0xffffffff, val, offset);
+      }
+
+      return val;
+  }
+  ```
+  这些数据相加的操作主要是在寄存器之间交换
