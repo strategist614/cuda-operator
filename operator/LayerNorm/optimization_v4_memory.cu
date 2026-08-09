@@ -45,7 +45,10 @@ void layernorm_cpu(
         float var = 0.0f;
 
         for (int c = 0; c < cols; ++c) {
-            float diff = x[r * cols + c] - mean;
+
+            float diff =
+                x[r * cols + c] - mean;
+
             var += diff * diff;
         }
 
@@ -64,28 +67,26 @@ void layernorm_cpu(
                 rstd;
 
             y[r * cols + c] =
-                norm * gamma[c] + beta[c];
+                norm * gamma[c]
+                +
+                beta[c];
         }
     }
 }
 
 
 // ============================================================
-// Welford state
+// Welford
 // ============================================================
 
-struct WelfordData
-{
+struct WelfordData {
     float mean;
     float m2;
     int count;
 };
 
 
-// ============================================================
-// 给 Welford state 加入一个新元素
-// ============================================================
-
+// 加入一个元素
 __device__ __forceinline__
 WelfordData welford_update(
     WelfordData a,
@@ -97,7 +98,8 @@ WelfordData welford_update(
         x - a.mean;
 
     a.mean +=
-        delta / static_cast<float>(a.count);
+        delta /
+        static_cast<float>(a.count);
 
     float delta2 =
         x - a.mean;
@@ -109,20 +111,7 @@ WelfordData welford_update(
 }
 
 
-// ============================================================
-// 合并两个 Welford state
-//
-// A:
-// count_a, mean_a, m2_a
-//
-// B:
-// count_b, mean_b, m2_b
-//
-//            ↓
-//
-// 合并后的 A+B
-// ============================================================
-
+// 合并两个 Welford 状态
 __device__ __forceinline__
 WelfordData welford_combine(
     WelfordData a,
@@ -143,7 +132,7 @@ WelfordData welford_combine(
     float count_b =
         static_cast<float>(b.count);
 
-    float count =
+    float total_count =
         count_a + count_b;
 
 
@@ -162,7 +151,7 @@ WelfordData welford_combine(
         +
         delta
         *
-        (count_b / count);
+        (count_b / total_count);
 
 
     out.m2 =
@@ -174,7 +163,13 @@ WelfordData welford_combine(
         *
         delta
         *
-        (count_a * count_b / count);
+        (
+            count_a
+            *
+            count_b
+            /
+            total_count
+        );
 
 
     return out;
@@ -182,26 +177,25 @@ WelfordData welford_combine(
 
 
 // ============================================================
-// Warp Welford reduction
-//
-// 32 threads
-//      ↓
-// 一个 WelfordData
+// Warp Welford Reduction
 // ============================================================
 
 __device__ __forceinline__
 WelfordData warp_reduce_welford(
     WelfordData val
 ) {
-    unsigned mask = 0xffffffffu;
+    constexpr unsigned mask =
+        0xffffffffu;
 
     int lane =
-        threadIdx.x % warpSize;
+        threadIdx.x & 31;
 
 
-    for (int offset = warpSize / 2;
-         offset > 0;
-         offset >>= 1) {
+    for (
+        int offset = 16;
+        offset > 0;
+        offset >>= 1
+    ) {
 
         WelfordData other;
 
@@ -213,12 +207,14 @@ WelfordData warp_reduce_welford(
                 offset
             );
 
+
         other.m2 =
             __shfl_down_sync(
                 mask,
                 val.m2,
                 offset
             );
+
 
         other.count =
             __shfl_down_sync(
@@ -228,8 +224,8 @@ WelfordData warp_reduce_welford(
             );
 
 
-        // 避免读取 warp 外不存在的数据
-        if (lane + offset < warpSize) {
+        if (lane + offset < 32) {
+
             val =
                 welford_combine(
                     val,
@@ -244,21 +240,7 @@ WelfordData warp_reduce_welford(
 
 
 // ============================================================
-// Block Welford reduction
-//
-// 256 threads
-//
-// ↓
-//
-// 8 warp results
-//
-// ↓ shared memory
-//
-// warp 0 再 reduction
-//
-// ↓
-//
-// 整行统计结果
+// Block Welford Reduction
 // ============================================================
 
 __device__ __forceinline__
@@ -270,27 +252,24 @@ WelfordData block_reduce_welford(
         threadIdx.x;
 
     int lane =
-        tid % warpSize;
+        tid & 31;
 
     int warp_id =
-        tid / warpSize;
+        tid >> 5;
 
 
-    // --------------------------------------------------------
-    // 每个 warp 内部 reduction
-    // --------------------------------------------------------
+    // -------------------------
+    // warp 内 reduction
+    // -------------------------
 
     val =
         warp_reduce_welford(val);
 
 
-    // --------------------------------------------------------
-    // 每个 warp 的 lane 0 保存结果
-    // --------------------------------------------------------
-
+    // 每个 warp 的 lane 0
+    // 保存一个结果
     if (lane == 0) {
-        shared[warp_id] =
-            val;
+        shared[warp_id] = val;
     }
 
 
@@ -298,14 +277,12 @@ WelfordData block_reduce_welford(
 
 
     int num_warps =
-        (blockDim.x + warpSize - 1)
-        /
-        warpSize;
+        (blockDim.x + 31) / 32;
 
 
-    // --------------------------------------------------------
-    // Warp 0 对 8 个 warp result 再做 reduction
-    // --------------------------------------------------------
+    // -------------------------
+    // warp 0 再 reduction
+    // -------------------------
 
     if (warp_id == 0) {
 
@@ -343,23 +320,31 @@ WelfordData block_reduce_welford(
 
 
 // ============================================================
-// LayerNorm V3
+// LayerNorm V4
 //
 // V1:
-// warp shuffle
+// warp shuffle reduction
 //
 // V2:
-// x 只读一次并放寄存器
+// x 只读一次，缓存在 register
 //
 // V3:
 // Welford 一次 reduction 得到 mean + variance
 //
-// 当前针对：
+// V4:
+// float4 vectorized load/store
+//
+// 当前 specialized:
 // cols = 1024
 // block = 256
+//
+// 1024 / 4 = 256 float4
+//
+// 所以刚好：
+// 一个 thread 负责一个 float4
 // ============================================================
 
-__global__ void layernorm_v3_kernel(
+__global__ void layernorm_v4_kernel(
     const float* __restrict__ x,
     const float* __restrict__ gamma,
     const float* __restrict__ beta,
@@ -383,6 +368,10 @@ __global__ void layernorm_v3_kernel(
     }
 
 
+    // ========================================================
+    // 当前行
+    // ========================================================
+
     const float* x_row =
         x
         +
@@ -400,45 +389,69 @@ __global__ void layernorm_v3_kernel(
 
 
     // ========================================================
-    // Step 1
+    // V4 核心
     //
-    // global memory -> registers
-    //
-    // 每个 x 只读取一次
+    // 把 float* 转成 float4*
     // ========================================================
 
-    int i0 =
-        tid;
-
-    int i1 =
-        tid + blockDim.x;
-
-    int i2 =
-        tid + blockDim.x * 2;
-
-    int i3 =
-        tid + blockDim.x * 3;
+    const float4* x4 =
+        reinterpret_cast<const float4*>(
+            x_row
+        );
 
 
-    float v0 =
-        x_row[i0];
+    const float4* gamma4 =
+        reinterpret_cast<const float4*>(
+            gamma
+        );
 
-    float v1 =
-        x_row[i1];
 
-    float v2 =
-        x_row[i2];
+    const float4* beta4 =
+        reinterpret_cast<const float4*>(
+            beta
+        );
 
-    float v3 =
-        x_row[i3];
+
+    float4* y4 =
+        reinterpret_cast<float4*>(
+            y_row
+        );
+
+
+    // ========================================================
+    // Step 1
+    //
+    // 一次 16-byte load
+    //
+    // thread 0:
+    // x[0], x[1], x[2], x[3]
+    //
+    // thread 1:
+    // x[4], x[5], x[6], x[7]
+    //
+    // ...
+    //
+    // thread 255:
+    // x[1020] ... x[1023]
+    // ========================================================
+
+    float4 v =
+        x4[tid];
+
+
+    // v.x
+    // v.y
+    // v.z
+    // v.w
+    //
+    // 后面全部复用这些寄存器
 
 
     // ========================================================
     // Step 2
-    //
-    // 每个线程自己对 4 个数据做 Welford
+    // local Welford
     // ========================================================
-    // 每个线程都会执行这个过程 所以现在 1024 个元素变成了 256 个 WelfordData
+
     WelfordData local;
 
     local.mean = 0.0f;
@@ -449,34 +462,34 @@ __global__ void layernorm_v3_kernel(
     local =
         welford_update(
             local,
-            v0
+            v.x
         );
+
 
     local =
         welford_update(
             local,
-            v1
+            v.y
         );
+
 
     local =
         welford_update(
             local,
-            v2
+            v.z
         );
+
 
     local =
         welford_update(
             local,
-            v3
+            v.w
         );
 
 
     // ========================================================
     // Step 3
-    //
-    // 整个 block 一次 Welford reduction
-    //
-    // 同时得到 mean 和 variance 信息
+    // 一个 block 一次 Welford reduction
     // ========================================================
 
     WelfordData stats =
@@ -507,49 +520,71 @@ __global__ void layernorm_v3_kernel(
     // ========================================================
     // Step 4
     //
-    // normalize + affine
-    //
-    // 继续复用寄存器里的 v0~v3
+    // gamma/beta 也使用 float4
     // ========================================================
 
-    y_row[i0] =
-        (v0 - mean)
+    float4 g =
+        gamma4[tid];
+
+
+    float4 b =
+        beta4[tid];
+
+
+    // ========================================================
+    // Step 5
+    // normalize + affine
+    // ========================================================
+
+    float4 out;
+
+
+    out.x =
+        (v.x - mean)
         *
         rstd
         *
-        gamma[i0]
+        g.x
         +
-        beta[i0];
+        b.x;
 
 
-    y_row[i1] =
-        (v1 - mean)
+    out.y =
+        (v.y - mean)
         *
         rstd
         *
-        gamma[i1]
+        g.y
         +
-        beta[i1];
+        b.y;
 
 
-    y_row[i2] =
-        (v2 - mean)
+    out.z =
+        (v.z - mean)
         *
         rstd
         *
-        gamma[i2]
+        g.z
         +
-        beta[i2];
+        b.z;
 
 
-    y_row[i3] =
-        (v3 - mean)
+    out.w =
+        (v.w - mean)
         *
         rstd
         *
-        gamma[i3]
+        g.w
         +
-        beta[i3];
+        b.w;
+
+
+    // ========================================================
+    // 一次 16-byte store
+    // ========================================================
+
+    y4[tid] =
+        out;
 }
 
 
@@ -557,7 +592,7 @@ __global__ void layernorm_v3_kernel(
 // Launcher
 // ============================================================
 
-void launch_layernorm_v3(
+void launch_layernorm_v4(
     const float* d_x,
     const float* d_gamma,
     const float* d_beta,
@@ -570,10 +605,20 @@ void launch_layernorm_v3(
         256;
 
 
+    // 当前版本专门针对：
+    //
+    // cols = 1024
+    //
+    // 1024 floats
+    // =
+    // 256 float4
+    //
+    // =
+    // 每线程正好一个 float4
     if (cols != 1024) {
 
         std::cerr
-            << "V3 currently requires cols = 1024"
+            << "V4 currently requires cols = 1024"
             << std::endl;
 
         std::exit(1);
@@ -585,17 +630,16 @@ void launch_layernorm_v3(
 
 
     int num_warps =
-        block / warpSize;
+        block / 32;
 
 
-    // 每个 warp 保存一个 WelfordData
     size_t shared_mem =
         num_warps
         *
         sizeof(WelfordData);
 
 
-    layernorm_v3_kernel<<<
+    layernorm_v4_kernel<<<
         grid,
         block,
         shared_mem
@@ -622,10 +666,10 @@ void launch_layernorm_v3(
 
 int main()
 {
-    int rows =
+    constexpr int rows =
         4096;
 
-    int cols =
+    constexpr int cols =
         1024;
 
     float eps =
@@ -662,12 +706,19 @@ int main()
     // ========================================================
 
     std::vector<float> h_x(numel);
+
     std::vector<float> h_y(numel);
+
     std::vector<float> h_ref(numel);
 
     std::vector<float> h_gamma(cols);
+
     std::vector<float> h_beta(cols);
 
+
+    // ========================================================
+    // Init
+    // ========================================================
 
     for (size_t i = 0;
          i < numel;
@@ -677,6 +728,7 @@ int main()
             static_cast<int>(i % 127)
             -
             63;
+
 
         h_x[i] =
             static_cast<float>(value)
@@ -732,12 +784,14 @@ int main()
         )
     );
 
+
     CHECK_CUDA(
         cudaMalloc(
             &d_y,
             bytes
         )
     );
+
 
     CHECK_CUDA(
         cudaMalloc(
@@ -746,6 +800,7 @@ int main()
         )
     );
 
+
     CHECK_CUDA(
         cudaMalloc(
             &d_beta,
@@ -753,6 +808,10 @@ int main()
         )
     );
 
+
+    // ========================================================
+    // H2D
+    // ========================================================
 
     CHECK_CUDA(
         cudaMemcpy(
@@ -792,7 +851,7 @@ int main()
          i < warmup;
          ++i) {
 
-        launch_layernorm_v3(
+        launch_layernorm_v4(
             d_x,
             d_gamma,
             d_beta,
@@ -823,6 +882,7 @@ int main()
         )
     );
 
+
     CHECK_CUDA(
         cudaEventCreate(
             &stop
@@ -841,7 +901,7 @@ int main()
          i < repeat;
          ++i) {
 
-        launch_layernorm_v3(
+        launch_layernorm_v4(
             d_x,
             d_gamma,
             d_beta,
@@ -889,14 +949,53 @@ int main()
 
 
     std::cout
-        << "V3 average kernel time: "
+        << "V4 average kernel time: "
         << avg_ms
         << " ms"
         << std::endl;
 
 
     // ========================================================
-    // Copy result
+    // Effective bandwidth
+    //
+    // x      read 1
+    // gamma  read 1
+    // beta   read 1
+    // y      write 1
+    //
+    // 总字节数和 V3 基本一样
+    //
+    // float4 优化的是访问方式，
+    // 不是减少总数据量
+    // ========================================================
+
+    double bytes_per_iter =
+        4.0
+        *
+        static_cast<double>(numel)
+        *
+        sizeof(float);
+
+
+    double bandwidth =
+        (
+            bytes_per_iter / 1e9
+        )
+        /
+        (
+            avg_ms / 1000.0
+        );
+
+
+    std::cout
+        << "Approx effective bandwidth: "
+        << bandwidth
+        << " GB/s"
+        << std::endl;
+
+
+    // ========================================================
+    // Correctness
     // ========================================================
 
     CHECK_CUDA(
@@ -908,10 +1007,6 @@ int main()
         )
     );
 
-
-    // ========================================================
-    // CPU reference
-    // ========================================================
 
     layernorm_cpu(
         h_x,
@@ -939,6 +1034,7 @@ int main()
                 h_ref[i]
             );
 
+
         max_err =
             std::max(
                 max_err,
@@ -954,7 +1050,7 @@ int main()
 
 
     // ========================================================
-    // Cleanup
+    // cleanup
     // ========================================================
 
     CHECK_CUDA(
@@ -962,6 +1058,7 @@ int main()
             start
         )
     );
+
 
     CHECK_CUDA(
         cudaEventDestroy(
