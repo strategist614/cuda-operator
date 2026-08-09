@@ -40,3 +40,10 @@ Block 4095  → 负责 row 4095
 │
 └─ thread 255 → col 255,511,767,1023
 ```
+
+### 优化思路
+
+* 在 `reduction` 那里 每次都需要 `__syncthreads()` 有很多次 `block synchronization`
+  所以优化思路是 `warp` 内不需要 `shared memory reduction`
+  我现在是 `256` 个 `threads` 一个 `warp` 有 `32` 个 `threads` 所以有 `8` 个 `wraps` 
+  `__shfl_down_sync()` 在 `wrap` 中能直接
