@@ -6,6 +6,11 @@
 #include <iostream>
 #include <vector>
 
+
+// ============================================================
+// CUDA error check
+// ============================================================
+
 #define CHECK_CUDA(call)                                                    \
 do {                                                                        \
     cudaError_t err = (call);                                               \
@@ -31,32 +36,34 @@ void rmsnorm_cpu(
 ) {
     for (int r = 0; r < rows; ++r) {
 
-        // ====================================
-        // Step 1: mean(x^2)
-        // ====================================
+        // --------------------------------
+        // Step 1: sum(x^2)
+        // --------------------------------
 
         float sum_sq = 0.0f;
 
         for (int c = 0; c < cols; ++c) {
             float v = x[r * cols + c];
+
             sum_sq += v * v;
         }
+
+
+        // --------------------------------
+        // Step 2: RMS
+        // --------------------------------
 
         float mean_sq =
             sum_sq / static_cast<float>(cols);
 
 
-        // ====================================
-        // Step 2: reciprocal RMS
-        // ====================================
-
         float rstd =
             1.0f / std::sqrt(mean_sq + eps);
 
 
-        // ====================================
-        // Step 3: normalize + gamma
-        // ====================================
+        // --------------------------------
+        // Step 3: normalize
+        // --------------------------------
 
         for (int c = 0; c < cols; ++c) {
 
@@ -72,29 +79,194 @@ void rmsnorm_cpu(
 
 
 // ============================================================
-// RMSNorm V0
+// Warp reduction
 //
-// 设计：
+// 一个 warp = 32 threads
 //
-// 1 block = 1 row
+// 每一个 thread 有一个 val
 //
-// cols = 1024
-// blockDim.x = 256
-//
-// 所以每个线程大约处理 4 个元素
-//
-// thread 0:
-// 0, 256, 512, 768
-//
-// thread 1:
-// 1, 257, 513, 769
-//
-// ...
-//
-// 使用 shared memory 做 naive reduction
+// 最终：
+// lane 0 得到整个 warp 的 sum
 // ============================================================
 
-__global__ void rmsnorm_v0_kernel(
+__device__ __forceinline__
+float warp_reduce_sum(float val)
+{
+    // offset:
+    //
+    // 16
+    // 8
+    // 4
+    // 2
+    // 1
+
+    for (
+        int offset = warpSize / 2;
+        offset > 0;
+        offset >>= 1
+    ) {
+
+        val +=
+            __shfl_down_sync(
+                0xffffffffu,
+                val,
+                offset
+            );
+    }
+
+    return val;
+}
+
+
+// ============================================================
+// Block reduction
+//
+// blockDim.x = 256
+//
+// 256 threads
+//      ↓
+// 8 warps
+//      ↓
+// 每个 warp 内 shuffle
+//      ↓
+// 8 个 warp sum
+//      ↓
+// shared memory
+//      ↓
+// warp 0 再 shuffle
+//      ↓
+// block sum
+// ============================================================
+
+__device__ __forceinline__
+float block_reduce_sum(
+    float val,
+    float* shared
+) {
+    int tid =
+        threadIdx.x;
+
+
+    // 当前 thread 在 warp 内的位置
+    //
+    // 0 ~ 31
+    int lane =
+        tid % warpSize;
+
+
+    // 当前 thread 属于哪个 warp
+    //
+    // block = 256:
+    //
+    // warp_id = 0 ~ 7
+    int warp_id =
+        tid / warpSize;
+
+
+    // ========================================================
+    // Step 1:
+    // 每个 warp 自己先 reduction
+    // ========================================================
+
+    val =
+        warp_reduce_sum(val);
+
+
+    // ========================================================
+    // Step 2:
+    // 每个 warp 的 lane 0 保存结果
+    // ========================================================
+
+    if (lane == 0) {
+
+        shared[warp_id] =
+            val;
+    }
+
+
+    // 不同 warp 之间需要同步
+    __syncthreads();
+
+
+    // block 中 warp 数量
+    int num_warps =
+        (
+            blockDim.x
+            +
+            warpSize
+            -
+            1
+        )
+        /
+        warpSize;
+
+
+    // ========================================================
+    // Step 3:
+    // Warp 0 读取每个 warp 的结果
+    // ========================================================
+
+    float block_sum =
+        0.0f;
+
+
+    if (warp_id == 0) {
+
+        // block = 256 时：
+        //
+        // lane 0 -> shared[0]
+        // lane 1 -> shared[1]
+        // ...
+        // lane 7 -> shared[7]
+        //
+        // lane 8~31 -> 0
+
+        if (lane < num_warps) {
+
+            block_sum =
+                shared[lane];
+        }
+
+
+        // Warp 0 再做一次 reduction
+        block_sum =
+            warp_reduce_sum(
+                block_sum
+            );
+
+
+        // lane 0 最终拿到整个 block 的 sum
+        if (lane == 0) {
+
+            shared[0] =
+                block_sum;
+        }
+    }
+
+
+    // 确保 shared[0] 已经准备好
+    __syncthreads();
+
+
+    // 所有 thread 都返回一样的结果
+    return shared[0];
+}
+
+
+// ============================================================
+// RMSNorm V1
+//
+// V0:
+// shared memory tree reduction
+//
+// V1:
+// warp shuffle reduction
+//
+// 注意：
+// 当前 x 仍然从 global memory 读取两遍
+// ============================================================
+
+__global__ void rmsnorm_v1_kernel(
     const float* __restrict__ x,
     const float* __restrict__ gamma,
     float* __restrict__ y,
@@ -102,7 +274,8 @@ __global__ void rmsnorm_v0_kernel(
     int cols,
     float eps
 ) {
-    extern __shared__ float sdata[];
+    extern __shared__ float shared[];
+
 
     int row =
         blockIdx.x;
@@ -116,7 +289,10 @@ __global__ void rmsnorm_v0_kernel(
     }
 
 
-    // 当前 block 负责第 row 行
+    // ========================================================
+    // 当前 block 负责一整行
+    // ========================================================
+
     const float* x_row =
         x
         +
@@ -135,75 +311,58 @@ __global__ void rmsnorm_v0_kernel(
 
     // ========================================================
     // Step 1:
-    // 每个线程计算自己负责元素的 sum(x^2) 每个线程负责 4 个元素
+    //
+    // 每个线程计算自己的局部 sum(x^2)
+    //
+    // cols = 1024
+    // block = 256
+    //
+    // 每个线程处理 4 个元素
     // ========================================================
 
     float sum_sq =
         0.0f;
-    
 
-    for (int i = tid;
-         i < cols;
-         i += blockDim.x) {
+
+    for (
+        int i = tid;
+        i < cols;
+        i += blockDim.x
+    ) {
 
         float v =
             x_row[i];
+
 
         sum_sq +=
             v * v;
     }
 
 
-    // 每个线程把自己的局部 sum_sq
-    // 放进 shared memory
-    sdata[tid] =
-        sum_sq;
-
-
-    __syncthreads();
-
-
     // ========================================================
     // Step 2:
-    // shared memory tree reduction
     //
-    // 256
-    // ↓
-    // 128
-    // ↓
-    // 64
-    // ↓
-    // ...
-    // ↓
-    // 1
+    // V1 核心优化
+    //
+    // 不再做 shared-memory tree reduction
+    //
+    // 改成 warp shuffle block reduction
     // ========================================================
 
-    for (
-        int stride = blockDim.x / 2;
-        stride > 0;
-        stride >>= 1
-    ) {
-
-        if (tid < stride) {
-
-            sdata[tid] +=
-                sdata[
-                    tid + stride
-                ];
-        }
-
-
-        __syncthreads();
-    }
+    float total_sum_sq =
+        block_reduce_sum(
+            sum_sq,
+            shared
+        );
 
 
     // ========================================================
     // Step 3:
-    // sdata[0] 就是整行 sum(x^2)
+    // mean(x^2)
     // ========================================================
 
     float mean_sq =
-        sdata[0]
+        total_sum_sq
         /
         static_cast<float>(cols);
 
@@ -216,18 +375,25 @@ __global__ void rmsnorm_v0_kernel(
 
     // ========================================================
     // Step 4:
+    //
     // normalize + gamma
     //
-    // RMSNorm:
+    // 注意：
+    // 这里又读了一次 x
     //
-    // y = x / rms * gamma
+    // 所以 V1 中：
     //
-    // 不需要减 mean
+    // x 第一次读 -> sum(x^2)
+    // x 第二次读 -> output
+    //
+    // 下一版 V2 才解决这个问题
     // ========================================================
 
-    for (int i = tid;
-         i < cols;
-         i += blockDim.x) {
+    for (
+        int i = tid;
+        i < cols;
+        i += blockDim.x
+    ) {
 
         float v =
             x_row[i];
@@ -247,7 +413,7 @@ __global__ void rmsnorm_v0_kernel(
 // Launcher
 // ============================================================
 
-void launch_rmsnorm_v0(
+void launch_rmsnorm_v1(
     const float* d_x,
     const float* d_gamma,
     float* d_y,
@@ -255,24 +421,55 @@ void launch_rmsnorm_v0(
     int cols,
     float eps
 ) {
-    int block =
+    constexpr int block =
         256;
+
 
     int grid =
         rows;
 
 
-    // 每个线程一个 float
+    // ========================================================
+    // V0:
     //
-    // 256 * 4 bytes
-    // = 1024 bytes
+    // shared_mem =
+    // 256 * sizeof(float)
+    //
+    //
+    // V1:
+    //
+    // 只需要保存每个 warp 的结果
+    //
+    // 256 threads / 32
+    // = 8 warps
+    //
+    // 只需要:
+    //
+    // 8 * sizeof(float)
+    // = 32 bytes
+    // ========================================================
+
+    int num_warps =
+        (
+            block
+            +
+            warpSize
+            -
+            1
+        )
+        /
+        warpSize;
+
+
     size_t shared_mem =
-        block
+        static_cast<size_t>(
+            num_warps
+        )
         *
         sizeof(float);
 
 
-    rmsnorm_v0_kernel<<<
+    rmsnorm_v1_kernel<<<
         grid,
         block,
         shared_mem
@@ -298,7 +495,7 @@ void launch_rmsnorm_v0(
 
 int main()
 {
-    // 模拟 Transformer:
+    // Transformer:
     //
     // rows = batch_size * seq_len
     // cols = hidden_size
@@ -321,8 +518,14 @@ int main()
         100;
 
 
+    // ========================================================
+    // Size
+    // ========================================================
+
     size_t numel =
-        static_cast<size_t>(rows)
+        static_cast<size_t>(
+            rows
+        )
         *
         cols;
 
@@ -340,7 +543,9 @@ int main()
 
 
     size_t bytes_gamma =
-        static_cast<size_t>(cols)
+        static_cast<size_t>(
+            cols
+        )
         *
         sizeof(float);
 
@@ -362,7 +567,7 @@ int main()
 
 
     // ========================================================
-    // Host memory
+    // Host
     // ========================================================
 
     std::vector<float> h_x(
@@ -501,7 +706,7 @@ int main()
         ++i
     ) {
 
-        launch_rmsnorm_v0(
+        launch_rmsnorm_v1(
             d_x,
             d_gamma,
             d_y,
@@ -552,7 +757,7 @@ int main()
         ++i
     ) {
 
-        launch_rmsnorm_v0(
+        launch_rmsnorm_v1(
             d_x,
             d_gamma,
             d_y,
@@ -606,30 +811,30 @@ int main()
 
 
     std::cout
-        << "V0 Average kernel time: "
+        << "V1 Average kernel time: "
         << avg_ms
         << " ms"
         << std::endl;
 
 
     // ========================================================
-    // 粗略估算 effective bandwidth
+    // Effective bandwidth
     //
-    // V0:
+    // 当前 V1：
     //
-    // 第一次:
-    // 读 x 求 sum(x^2)       -> 1x
+    // x 第一次 read    -> 1
+    // x 第二次 read    -> 1
+    // gamma read       -> 1
+    // y write          -> 1
     //
-    // 第二次:
-    // 读 x 做 output         -> 1x
-    //
-    // 读 gamma              -> 1x
-    //
-    // 写 y                  -> 1x
-    //
-    // 总共粗略:
+    // 总计粗略：
     //
     // 4 * numel * sizeof(float)
+    //
+    // 注意：
+    // V1 和 V0 的 global memory 流量基本没有改变
+    //
+    // V1 优化的是 reduction
     // ========================================================
 
     double bytes_per_iter =
@@ -666,7 +871,7 @@ int main()
 
 
     // ========================================================
-    // Copy result back
+    // Device -> Host
     // ========================================================
 
     CHECK_CUDA(
@@ -694,7 +899,7 @@ int main()
 
 
     // ========================================================
-    // Correctness check
+    // Correctness
     // ========================================================
 
     float max_err =
