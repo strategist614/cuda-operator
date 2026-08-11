@@ -34,7 +34,7 @@ __global__ void softmax1D(
     const int block_size = blockDim.x;
 
     float max_val = -INFINITY;
-    
+    // 先求出线程负责的元素的最大值
     for(auto i = tid; i < n; i += block_size){
         max_val = fmaxf(max_val, input[i]);
     }
