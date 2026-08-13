@@ -92,7 +92,9 @@ __global__ void softmaxV1(
     // lane 0~9 有效
     // lane 10~31 无效
     // --------------------------------------------------------
-
+    // 生成一个“哪些线程有效”的32位名单
+    // 根据 n 的大小，mask 的低 n 位为 1，高位为 0
+    // 也就是说当前的 tid < n 的线程才是有效的线程 也就是true
     const unsigned mask =
         __ballot_sync(
             0xffffffff,
