@@ -41,6 +41,8 @@ __global__ void gemmV0(
     int K) {
 
     // 当前线程负责的输出矩阵坐标
+    // row 是当前线程负责的输出矩阵 C 的行索引
+    // col 是当前线程负责的输出矩阵 C 的列索引
     const int row =
         blockIdx.y * blockDim.y
         + threadIdx.y;
