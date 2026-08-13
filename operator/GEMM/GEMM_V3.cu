@@ -6,9 +6,6 @@
 #include <iostream>
 #include <vector>
 
-// ============================================================
-// CUDA Error Check
-// ============================================================
 
 #define CUDA_CHECK(call)                                      \
     do {                                                      \
@@ -25,58 +22,42 @@
 
 
 // ============================================================
-// GEMM V2 Configuration
-// ============================================================
+// GEMM V3 Configuration
 //
-// 一个 block 计算 C 的:
+// 一个 block:
+//     16 x 16 threads
+//     = 256 threads
 //
-//      32 x 32
+// 一个 thread:
+//     计算 4 x 4 个 C
 //
-// 每个 thread 计算:
+// 所以一个 block:
+//     计算 64 x 64 个 C
 //
-//      2 x 2
-//
-// 因此需要:
-//
-//      32 / 2 = 16 threads in x
-//      32 / 2 = 16 threads in y
-//
-// 总线程数:
-//
-//      16 x 16 = 256 threads
-//
-// K 每次处理 16 个:
-//
-//      BLOCK_K = 16
+// K 每次处理:
+//     16
 //
 // ============================================================
 
-constexpr int BLOCK_M = 32;
-constexpr int BLOCK_N = 32;
+constexpr int BLOCK_M = 64;
+constexpr int BLOCK_N = 64;
 constexpr int BLOCK_K = 16;
 
-constexpr int THREAD_M = 2;
-constexpr int THREAD_N = 2;
+constexpr int THREAD_M = 4;
+constexpr int THREAD_N = 4;
 
 
 // ============================================================
-// GEMM V2
+// GEMM V3
 //
-// C = A * B
+// C[M,N] = A[M,K] * B[K,N]
 //
-// A: [M, K]
-// B: [K, N]
-// C: [M, N]
-//
-// V2:
-//
-// 1. Shared Memory Tiling
-// 2. Register Tiling
-// 3. 一个 thread 计算 2 x 2 个 C
-//
+// Shared Memory Tiling
+// +
+// 4x4 Register Tiling
 // ============================================================
 
-__global__ void gemmV2(
+__global__ void gemmV3(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -84,61 +65,47 @@ __global__ void gemmV2(
     int N,
     int K) {
 
-    // ========================================================
-    // 当前 thread 在 block 中的位置
+    // --------------------------------------------------------
+    // Thread index
     //
-    // tx: 0 ~ 15
-    // ty: 0 ~ 15
-    // ========================================================
+    // tx = 0 ~ 15
+    // ty = 0 ~ 15
+    // --------------------------------------------------------
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
 
-    // 把二维 thread id 转成一维
-    //
-    // 0 ~ 255
     const int tid =
         ty * blockDim.x + tx;
 
 
-    // ========================================================
+    // --------------------------------------------------------
     // Shared Memory
     //
-    // A Tile:
+    // A tile:
+    //     64 x 16
     //
-    //     32 x 16
+    // B tile:
+    //     16 x 64
     //
-    // B Tile:
-    //
-    //     16 x 32
-    //
-    // ========================================================
+    // --------------------------------------------------------
 
     __shared__ float As[BLOCK_M][BLOCK_K];
-
     __shared__ float Bs[BLOCK_K][BLOCK_N];
 
 
-    // ========================================================
-    // 当前线程负责 C tile 中的位置
+    // --------------------------------------------------------
+    // 当前 thread 在 block C tile 中负责区域的左上角
     //
-    // 一个 thread 负责 2 x 2
+    // ty=0 -> row 0
+    // ty=1 -> row 4
+    // ty=2 -> row 8
     //
-    // 比如:
-    //
-    // tx = 3
-    // ty = 5
-    //
-    // thread_row = 10
-    // thread_col = 6
-    //
-    // 负责:
-    //
-    // C[10][6]  C[10][7]
-    // C[11][6]  C[11][7]
-    //
-    // ========================================================
-    // 得到每个 thread 负责的 C tile 的起点
+    // tx=0 -> col 0
+    // tx=1 -> col 4
+    // tx=2 -> col 8
+    // --------------------------------------------------------
+
     const int thread_row =
         ty * THREAD_M;
 
@@ -146,9 +113,9 @@ __global__ void gemmV2(
         tx * THREAD_N;
 
 
-    // ========================================================
-    // 当前 block 在整个 C 矩阵中的起点
-    // ========================================================
+    // --------------------------------------------------------
+    // 当前 block 对应整个 C 的起点
+    // --------------------------------------------------------
 
     const int block_row =
         blockIdx.y * BLOCK_M;
@@ -160,26 +127,36 @@ __global__ void gemmV2(
     // ========================================================
     // Register Tile
     //
-    // 当前 thread 的 4 个输出结果
+    // 一个 thread 负责 4 x 4 = 16 个 C
     //
-    // 全程放在 thread private scalar 中
-    //
+    // 尽量写成 scalar，
+    // 方便编译器放进 register
     // ========================================================
-    // 每个 thread 计算 2 x 2 个 C
-    // 这个结果都是放在 register 中的
+
     float c00 = 0.0f;
     float c01 = 0.0f;
+    float c02 = 0.0f;
+    float c03 = 0.0f;
 
     float c10 = 0.0f;
     float c11 = 0.0f;
+    float c12 = 0.0f;
+    float c13 = 0.0f;
+
+    float c20 = 0.0f;
+    float c21 = 0.0f;
+    float c22 = 0.0f;
+    float c23 = 0.0f;
+
+    float c30 = 0.0f;
+    float c31 = 0.0f;
+    float c32 = 0.0f;
+    float c33 = 0.0f;
 
 
-    // ========================================================
-    // K 方向分块
-    //
-    // 每次处理 BLOCK_K = 16
-    //
-    // ========================================================
+    // --------------------------------------------------------
+    // K 方向分 tile
+    // --------------------------------------------------------
 
     const int num_k_tiles =
         (K + BLOCK_K - 1)
@@ -191,21 +168,22 @@ __global__ void gemmV2(
          ++tile) {
 
         // ====================================================
-        // Step 1
+        // Step 1:
+        // cooperative load A
         //
-        // 256 threads 合作加载:
+        // As:
+        //     64 x 16
+        //     = 1024 floats
         //
-        // As = 32 x 16 = 512 elements
+        // 256 threads
         //
-        // 每个 thread 搬 2 个 A
-        //
+        // 平均每个 thread 搬 4 个 A
         // ====================================================
 
         for (int index = tid;
              index < BLOCK_M * BLOCK_K;
              index += blockDim.x * blockDim.y) {
 
-            // shared memory 坐标
             const int smem_row =
                 index / BLOCK_K;
 
@@ -213,7 +191,6 @@ __global__ void gemmV2(
                 index % BLOCK_K;
 
 
-            // global memory 坐标
             const int global_row =
                 block_row + smem_row;
 
@@ -240,14 +217,14 @@ __global__ void gemmV2(
 
 
         // ====================================================
-        // Step 2
+        // Step 2:
+        // cooperative load B
         //
-        // 256 threads 合作加载:
+        // Bs:
+        //     16 x 64
+        //     = 1024 floats
         //
-        // Bs = 16 x 32 = 512 elements
-        //
-        // 每个 thread 搬 2 个 B
-        //
+        // 平均每个 thread 搬 4 个 B
         // ====================================================
 
         for (int index = tid;
@@ -287,19 +264,25 @@ __global__ void gemmV2(
         }
 
 
-        // ====================================================
-        // 等待整个 block 把 A/B Tile 搬完
-        // ====================================================
-
+        // 等大家搬完
         __syncthreads();
 
 
         // ====================================================
-        // Step 3
+        // Step 3:
         //
         // Register Tiling
         //
-        // 每个 thread 计算 2 x 2 个结果
+        // 每个 k:
+        //
+        // 从 Shared Memory:
+        //
+        // 读取:
+        //     4 个 A
+        //     4 个 B
+        //
+        // 得到:
+        //     16 次 FMA
         //
         // ====================================================
 
@@ -309,141 +292,232 @@ __global__ void gemmV2(
              k < BLOCK_K;
              ++k) {
 
-            // =================================================
-            // 从 Shared Memory 读取两个 A
+            // ------------------------------------------------
+            // 从 A tile 拿 4 个数
             //
-            // A:
+            //        a0
+            //        a1
+            //        a2
+            //        a3
             //
-            // a0  ---->
-            // a1  ---->
-            //
-            // =================================================
+            // ------------------------------------------------
 
             const float a0 =
-                As[
-                    thread_row + 0
-                ][k];
+                As[thread_row + 0][k];
 
             const float a1 =
-                As[
-                    thread_row + 1
-                ][k];
+                As[thread_row + 1][k];
+
+            const float a2 =
+                As[thread_row + 2][k];
+
+            const float a3 =
+                As[thread_row + 3][k];
 
 
-            // =================================================
-            // 从 Shared Memory 读取两个 B
+            // ------------------------------------------------
+            // 从 B tile 拿 4 个数
             //
-            // B:
+            // b0 b1 b2 b3
             //
-            // b0 b1
-            //
-            // =================================================
+            // ------------------------------------------------
 
             const float b0 =
-                Bs[
-                    k
-                ][
-                    thread_col + 0
-                ];
+                Bs[k][thread_col + 0];
 
             const float b1 =
-                Bs[
-                    k
-                ][
-                    thread_col + 1
-                ];
+                Bs[k][thread_col + 1];
+
+            const float b2 =
+                Bs[k][thread_col + 2];
+
+            const float b3 =
+                Bs[k][thread_col + 3];
 
 
             // =================================================
-            // 关键:
+            // 4 x 4 Outer Product
             //
-            // 4 个 register accumulator
             //
-            //         b0      b1
+            //             b0    b1    b2    b3
             //
-            // a0     c00     c01
+            //      a0    c00   c01   c02   c03
             //
-            // a1     c10     c11
+            //      a1    c10   c11   c12   c13
+            //
+            //      a2    c20   c21   c22   c23
+            //
+            //      a3    c30   c31   c32   c33
+            //
             //
             // =================================================
+
+
+            // row 0
 
             c00 += a0 * b0;
             c01 += a0 * b1;
+            c02 += a0 * b2;
+            c03 += a0 * b3;
+
+
+            // row 1
 
             c10 += a1 * b0;
             c11 += a1 * b1;
+            c12 += a1 * b2;
+            c13 += a1 * b3;
+
+
+            // row 2
+
+            c20 += a2 * b0;
+            c21 += a2 * b1;
+            c22 += a2 * b2;
+            c23 += a2 * b3;
+
+
+            // row 3
+
+            c30 += a3 * b0;
+            c31 += a3 * b1;
+            c32 += a3 * b2;
+            c33 += a3 * b3;
         }
 
 
-        // ====================================================
-        // 当前 tile 使用完
-        //
-        // 下一轮准备覆盖 shared memory
-        // ====================================================
+        // 当前 tile 大家都用完
+        // 才允许下一轮覆盖 Shared Memory
 
         __syncthreads();
     }
 
 
     // ========================================================
-    // Step 4
+    // Step 4:
     //
-    // 计算当前 thread 最终负责的 global C 坐标
+    // 当前 thread 最终负责:
+    //
+    // row0:
+    //   c00 c01 c02 c03
+    //
+    // row1:
+    //   c10 c11 c12 c13
+    //
+    // row2:
+    //   c20 c21 c22 c23
+    //
+    // row3:
+    //   c30 c31 c32 c33
+    //
     // ========================================================
 
     const int row0 =
-        block_row
-        + thread_row;
+        block_row + thread_row + 0;
 
     const int row1 =
-        row0 + 1;
+        block_row + thread_row + 1;
+
+    const int row2 =
+        block_row + thread_row + 2;
+
+    const int row3 =
+        block_row + thread_row + 3;
 
 
     const int col0 =
-        block_col
-        + thread_col;
+        block_col + thread_col + 0;
 
     const int col1 =
-        col0 + 1;
+        block_col + thread_col + 1;
+
+    const int col2 =
+        block_col + thread_col + 2;
+
+    const int col3 =
+        block_col + thread_col + 3;
 
 
     // ========================================================
-    // Step 5
-    //
     // Register -> Global Memory
     // ========================================================
 
-    if (row0 < M && col0 < N) {
 
-        C[row0 * N + col0] =
-            c00;
+    // row 0
+
+    if (row0 < M) {
+
+        if (col0 < N)
+            C[row0 * N + col0] = c00;
+
+        if (col1 < N)
+            C[row0 * N + col1] = c01;
+
+        if (col2 < N)
+            C[row0 * N + col2] = c02;
+
+        if (col3 < N)
+            C[row0 * N + col3] = c03;
     }
 
 
-    if (row0 < M && col1 < N) {
+    // row 1
 
-        C[row0 * N + col1] =
-            c01;
+    if (row1 < M) {
+
+        if (col0 < N)
+            C[row1 * N + col0] = c10;
+
+        if (col1 < N)
+            C[row1 * N + col1] = c11;
+
+        if (col2 < N)
+            C[row1 * N + col2] = c12;
+
+        if (col3 < N)
+            C[row1 * N + col3] = c13;
     }
 
 
-    if (row1 < M && col0 < N) {
+    // row 2
 
-        C[row1 * N + col0] =
-            c10;
+    if (row2 < M) {
+
+        if (col0 < N)
+            C[row2 * N + col0] = c20;
+
+        if (col1 < N)
+            C[row2 * N + col1] = c21;
+
+        if (col2 < N)
+            C[row2 * N + col2] = c22;
+
+        if (col3 < N)
+            C[row2 * N + col3] = c23;
     }
 
 
-    if (row1 < M && col1 < N) {
+    // row 3
 
-        C[row1 * N + col1] =
-            c11;
+    if (row3 < M) {
+
+        if (col0 < N)
+            C[row3 * N + col0] = c30;
+
+        if (col1 < N)
+            C[row3 * N + col1] = c31;
+
+        if (col2 < N)
+            C[row3 * N + col2] = c32;
+
+        if (col3 < N)
+            C[row3 * N + col3] = c33;
     }
 }
 
 
 // ============================================================
-// CPU Reference
+// CPU reference
 // ============================================================
 
 void gemmCPU(
@@ -454,10 +528,7 @@ void gemmCPU(
     int N,
     int K) {
 
-    C.resize(
-        M * N
-    );
-
+    C.resize(M * N);
 
     for (int row = 0;
          row < M;
@@ -467,31 +538,20 @@ void gemmCPU(
              col < N;
              ++col) {
 
-            float sum =
-                0.0f;
-
+            float sum = 0.0f;
 
             for (int k = 0;
                  k < K;
                  ++k) {
 
                 sum +=
-                    A[
-                        row * K
-                        + k
-                    ]
+                    A[row * K + k]
                     *
-                    B[
-                        k * N
-                        + col
-                    ];
+                    B[k * N + col];
             }
 
-
-            C[
-                row * N
-                + col
-            ] = sum;
+            C[row * N + col] =
+                sum;
         }
     }
 }
@@ -503,45 +563,23 @@ void gemmCPU(
 
 int main() {
 
-    // ========================================================
-    // Matrix Size
-    //
-    // A: [M, K]
-    // B: [K, N]
-    // C: [M, N]
-    // ========================================================
-
-    constexpr int M = 128;
-    constexpr int N = 128;
-    constexpr int K = 128;
+    constexpr int M = 256;
+    constexpr int N = 256;
+    constexpr int K = 256;
 
 
-    // ========================================================
-    // Host Memory
-    // ========================================================
+    std::vector<float> h_A(M * K);
+    std::vector<float> h_B(K * N);
+    std::vector<float> h_C(M * N);
 
-    std::vector<float>
-        h_A(M * K);
-
-    std::vector<float>
-        h_B(K * N);
-
-    std::vector<float>
-        h_C(M * N);
-
-
-    // ========================================================
-    // 初始化
-    // ========================================================
 
     for (int i = 0;
          i < M * K;
          ++i) {
 
         h_A[i] =
-            static_cast<float>(
-                i % 13
-            ) / 10.0f;
+            static_cast<float>(i % 13)
+            / 10.0f;
     }
 
 
@@ -550,24 +588,14 @@ int main() {
          ++i) {
 
         h_B[i] =
-            static_cast<float>(
-                i % 7
-            ) / 10.0f;
+            static_cast<float>(i % 7)
+            / 10.0f;
     }
 
 
-    // ========================================================
-    // Device Memory
-    // ========================================================
-
-    float* d_A =
-        nullptr;
-
-    float* d_B =
-        nullptr;
-
-    float* d_C =
-        nullptr;
+    float* d_A = nullptr;
+    float* d_B = nullptr;
+    float* d_C = nullptr;
 
 
     CUDA_CHECK(
@@ -577,14 +605,12 @@ int main() {
         )
     );
 
-
     CUDA_CHECK(
         cudaMalloc(
             &d_B,
             K * N * sizeof(float)
         )
     );
-
 
     CUDA_CHECK(
         cudaMalloc(
@@ -594,10 +620,6 @@ int main() {
     );
 
 
-    // ========================================================
-    // CPU -> GPU
-    // ========================================================
-
     CUDA_CHECK(
         cudaMemcpy(
             d_A,
@@ -606,7 +628,6 @@ int main() {
             cudaMemcpyHostToDevice
         )
     );
-
 
     CUDA_CHECK(
         cudaMemcpy(
@@ -618,24 +639,14 @@ int main() {
     );
 
 
-    // ========================================================
-    // Block
-    //
-    // 一个 thread 算 2 x 2
-    //
-    // C tile = 32 x 32
+    // --------------------------------------------------------
+    // 64 / 4 = 16
     //
     // 所以:
     //
-    // 32 / 2 = 16
-    //
-    // block:
-    //
-    // 16 x 16
-    // =
-    // 256 threads
-    //
-    // ========================================================
+    // block = 16 x 16
+    //       = 256 threads
+    // --------------------------------------------------------
 
     dim3 block(
         BLOCK_N / THREAD_N,
@@ -643,11 +654,9 @@ int main() {
     );
 
 
-    // ========================================================
-    // Grid
-    //
-    // 每个 block 负责 C 的 32 x 32
-    // ========================================================
+    // --------------------------------------------------------
+    // 每个 block 负责 64 x 64 C
+    // --------------------------------------------------------
 
     dim3 grid(
         (N + BLOCK_N - 1)
@@ -658,11 +667,7 @@ int main() {
     );
 
 
-    // ========================================================
-    // Launch
-    // ========================================================
-
-    gemmV2<<<grid, block>>>(
+    gemmV3<<<grid, block>>>(
         d_A,
         d_B,
         d_C,
@@ -676,15 +681,10 @@ int main() {
         cudaGetLastError()
     );
 
-
     CUDA_CHECK(
         cudaDeviceSynchronize()
     );
 
-
-    // ========================================================
-    // GPU -> CPU
-    // ========================================================
 
     CUDA_CHECK(
         cudaMemcpy(
@@ -696,13 +696,9 @@ int main() {
     );
 
 
-    // ========================================================
-    // CPU Reference
-    // ========================================================
+    // CPU reference
 
-    std::vector<float>
-        cpu_C;
-
+    std::vector<float> cpu_C;
 
     gemmCPU(
         h_A,
@@ -714,13 +710,9 @@ int main() {
     );
 
 
-    // ========================================================
     // Verify
-    // ========================================================
 
-    float max_error =
-        0.0f;
-
+    float max_error = 0.0f;
 
     for (int i = 0;
          i < M * N;
@@ -731,7 +723,6 @@ int main() {
                 h_C[i]
                 - cpu_C[i]
             );
-
 
         max_error =
             std::max(
@@ -773,37 +764,13 @@ int main() {
         << '\n';
 
 
-    std::cout
-        << "First 10 CUDA results:\n";
-
-
-    for (int i = 0;
-         i < 10;
-         ++i) {
-
-        std::cout
-            << h_C[i]
-            << " ";
-    }
-
-
-    std::cout
-        << '\n';
-
-
-    // ========================================================
-    // Free
-    // ========================================================
-
     CUDA_CHECK(
         cudaFree(d_A)
     );
 
-
     CUDA_CHECK(
         cudaFree(d_B)
     );
-
 
     CUDA_CHECK(
         cudaFree(d_C)
