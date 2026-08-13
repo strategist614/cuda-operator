@@ -59,7 +59,7 @@ __global__ void gemmV1(
     // tx: 0 ~ 15
     // ty: 0 ~ 15
     // ========================================================
-
+    // 每个线程都是负责一个 C[row][col] 的计算
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
 
@@ -84,7 +84,7 @@ __global__ void gemmV1(
     // Bs:
     // B 当前的 16 x 16 tile
     // ========================================================
-
+    // GPU内部的存储空间 同一个block的线程共享 在GPU SM上的高速片上面
     __shared__ float As[TILE_SIZE][TILE_SIZE];
 
     __shared__ float Bs[TILE_SIZE][TILE_SIZE];
@@ -114,7 +114,7 @@ __global__ void gemmV1(
     // tile 2: k = 32 ~ 47
     // tile 3: k = 48 ~ 63
     // ========================================================
-
+    // 计算一下 tile 的数量
     const int num_tiles =
         (K + TILE_SIZE - 1)
         / TILE_SIZE;
