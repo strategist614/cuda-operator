@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
 
 // ============================================================
 #define checkCudaErrors(call)                                      \
@@ -40,6 +41,10 @@ __global__ void add_float4(float *a, float *b, float *c, int n){
         c4.w = a4.w + b4.w;
 
         FLOAT4(c[idx]) = c4;
+    }else {
+        for(int i = idx;i < n; ++i){
+            c[i] = a[i] + b[i];
+        }
     }
 }
 
@@ -74,8 +79,9 @@ int main()
     );
 
     int blocksize = 256;
-    int gridsize = CEIL(N / 4, blocksize);
-
+    int num_float4 = CEIL(N, 4);
+    int gridsize = CEIL(num_float4, blocksize);
+    // 前一个参数是启动多少个 blocks 后一个参数是每个block启动多少个 threads
     add_float4<<<gridsize, blocksize>>>(d_a, d_b, d_c, N);
 
     checkCudaErrors(cudaGetLastError());
@@ -124,6 +130,5 @@ int main()
     delete[] h_c;
 
 
-    return 0;
     return 0;
 }
