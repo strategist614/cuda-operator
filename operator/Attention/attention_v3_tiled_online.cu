@@ -494,13 +494,13 @@ void attentionV3Kernel(
     // ========================================================
 
     float m0 =
-        -CUDART_INF_F;
+        -INFINITY;
 
     float l0 =
         0.0f;
 
     float m1 =
-        -CUDART_INF_F;
+        -INFINITY;
 
     float l1 =
         0.0f;
@@ -824,7 +824,7 @@ void attentionV3Kernel(
         }
         else {
             s00 =
-                -CUDART_INF_F;
+                -INFINITY;
         }
 
 
@@ -837,7 +837,7 @@ void attentionV3Kernel(
         }
         else {
             s01 =
-                -CUDART_INF_F;
+                -INFINITY;
         }
 
 
@@ -850,7 +850,7 @@ void attentionV3Kernel(
         }
         else {
             s10 =
-                -CUDART_INF_F;
+                -INFINITY;
         }
 
 
@@ -863,7 +863,7 @@ void attentionV3Kernel(
         }
         else {
             s11 =
-                -CUDART_INF_F;
+                -INFINITY;
         }
 
 
@@ -973,7 +973,7 @@ void attentionV3Kernel(
 
         const float alpha0 =
             (
-                m0 == -CUDART_INF_F
+                m0 == -INFINITY
             )
             ?
             0.0f
@@ -987,7 +987,7 @@ void attentionV3Kernel(
 
         const float alpha1 =
             (
-                m1 == -CUDART_INF_F
+                m1 == -INFINITY
             )
             ?
             0.0f
