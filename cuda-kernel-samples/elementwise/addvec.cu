@@ -28,9 +28,11 @@
 #define FLOAT4(value) (reinterpret_cast<float4*>(&(value))[0])
 
 __global__ void add_float4(float *a, float *b, float *c, int n){
-
+    // idx: 当前线程要处理的数据，在数组里的起始下标
+    // threadIdx: 当前线程的下标
     int idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if(idx + 3 < n){
+        // 得到起始位置
         float4 a4 = FLOAT4(a[idx]);
         float4 b4 = FLOAT4(b[idx]);
 
