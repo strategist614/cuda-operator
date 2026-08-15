@@ -26,9 +26,15 @@ using namespace std;
 __global__ void sigmoid(float *a, float *b, int N){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(idx < N){
-        float sum = 1.0f;
-        b[idx] = 1.0f / (1.0f + expf(-a[idx]));
+    if (idx < N) {
+        float x = a[idx];
+
+        if (x >= 0.0f) {
+            b[idx] = 1.0f / (1.0f + expf(-x));
+        } else {
+            float e = expf(x);
+            b[idx] = e / (1.0f + e);
+        }
     }
 }
 
@@ -49,7 +55,7 @@ int main(){
     checkCudaErrors(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
 
     int blocksize = 256;
-    int gridsize = N / blocksize;
+    int gridsize = (N + blocksize - 1) / blocksize;
 
     sigmoid<<<gridsize, blocksize>>>(d_a, d_b, N);
 
