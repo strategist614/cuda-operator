@@ -25,82 +25,68 @@ __device__ float warp_reduce_max(float val){
 }
 
 __device__ float warp_reduce_sum(float sum){
-    for(int offset = 16;offset >0;offset >>= 1){
+    for(int offset = 16; offset >0 ;offset >>= 1){
         sum += __shfl_down_sync(0xffffffff, sum, offset);
     }
     return sum;
 }
 
-__global__ void softmax(const float * x, float * y, int n){
-    __shared__ float warp_data[32];
-
+__global__ void softmax(float *x, float *y, int n){
+    __shared__ float _sdata[32];
     int tid = threadIdx.x;
-    int lane = tid & 31;
+    int idx = blockIdx.x * blockDim.x + tid;
+
+    int lane = tid % 32;
     int warp_id = tid / 32;
 
-    int num_warps = (blockDim.x + 31) / 32;
+    int num_warps = (blockDim.x + 32 - 1) /32;
 
     float local_max = -INFINITY;
-    for(int i = tid; i < n;i += blockDim.x) {
+
+    for(int i = tid; i< n;i += blockDim.x){
         local_max = fmaxf(local_max, x[i]);
     }
 
     local_max = warp_reduce_max(local_max);
 
     if(lane == 0){
-        warp_data[warp_id] = local_max;
+        _sdata[warp_id] = local_max;
     }
 
     __syncthreads();
 
-    float max_val = -INFINITY;
+    float maxn = -INFINITY; 
     if(warp_id == 0){
-        max_val = (lane < num_warps) ? warp_data[lane] : -INFINITY;
-
-        max_val = warp_reduce_max(max_val);
-
-        if(lane == 0) warp_data[0] = max_val;
+        maxn = (lane < num_warps) ? _sdata[lane]:-INFINITY;
+        maxn = warp_reduce_max(maxn);
+        if(lane == 0) _sdata[0] = maxn;
     }
     __syncthreads();
+    maxn = _sdata[0];
 
-    max_val = warp_data[0];
-
-    float local_sum = 0.0f;
-
-    for(int i = tid; i < n;i += blockDim.x){
-        local_sum += expf(x[i] - max_val);
+    float local_sum = -INFINITY;
+    for(int i = tid;i < n;i+=blockDim.x) {
+        local_sum += expf(x[i] - maxn);
     }
 
     local_sum = warp_reduce_sum(local_sum);
 
-    if(lane == 0) warp_data[warp_id] = local_sum;
-
-    __syncthreads();
-
-    float sum = 0.0f;
-
-    if (warp_id == 0) {
-
-        sum =
-            (lane < num_warps)
-            ? warp_data[lane]
-            : 0.0f;
-
-        sum = warp_reduce_sum(sum);
-
-        if (lane == 0) {
-            warp_data[0] = sum;
-        }
+    if(lane == 0){
+        _sdata[warp_id] = local_sum;
     }
 
     __syncthreads();
 
-    sum = warp_data[0];
-
-    for (int i = tid; i < n; i += blockDim.x) {
-
-        y[i] =
-            expf(x[i] - max_val) / sum;
+    if(warp_id == 0){
+        local_sum = (lane < num_warps) ? _sdata[lane] : -INFINITY;
+        local_sum = warp_reduce_sum(local_sum);
+        if(lane == 0) _sdata[0] = local_sum;
+    }
+    __syncthreads();
+    local_sum = _sdata[0];
+    
+    for(int i = tid;i < n;i += blockDim.x){
+        y[i] = expf(x[i] - maxn) / local_sum;
     }
 }
 
