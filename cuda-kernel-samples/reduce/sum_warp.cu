@@ -92,7 +92,7 @@ __global__ void reduce_sum_float4(
     // ==========================================
     // 第一个 warp reduction 所有 warp sums
     // ==========================================
-
+    // 算的是一个 block 的和
     int num_warps =
         (blockDim.x + 31) / 32;
 
@@ -191,7 +191,7 @@ int main()
     checkCudaErrors(
         cudaDeviceSynchronize()
     );
-
+    // d_result 就存一个结果 所以 sizeof(float) * 1 就行  
     float* d_result = nullptr;
 
     checkCudaErrors(
