@@ -1,4 +1,33 @@
-# Mini Triton v0.2.1
+# Mini Triton v0.2 Series
+
+本目录保存 Mini Triton v0.2 系列的三个教学版本。整个系列围绕 tensor-level IR 展开：先在 v0.2.1 建立 Tensor IR，再在 v0.2.2 接入类型检查，最后由 v0.2.3 加入明确的 type/shape 与 simplify pass pipeline。
+
+## 版本导航
+
+| 版本 | 位置 | 主要变化 | 输出行为 |
+| --- | --- | --- | --- |
+| v0.2.1 | 当前目录 | PointerType、TensorType、函数参数 lowering、tensor load/add/store | 写入 `output/*.tir` 和 `output/*.ptx` |
+| v0.2.2 | [`mini-triton-v0.2.2/`](mini-triton-v0.2.2/) | 新增 ScalarType 与 TypeCheckPass，检查 add shape/dtype 和 load 类型 | 写入 `output/*.tir` 和 `output/*.ptx` |
+| v0.2.3 | [`mini-triton-v0.2.3/`](mini-triton-v0.2.3/) | tuple shape、TypeShapePass、SimplifyPass；v0.2 收尾版本 | 只返回并打印 IR/PTX，不自动写文件 |
+
+建议按 v0.2.1 → v0.2.2 → v0.2.3 的顺序阅读。每个子版本都是独立的小型 Python 项目，使用各自目录中的同名模块，不应跨目录混合导入。
+
+## 系列演进
+
+```text
+v0.2.1
+Tensor IR + pointer arguments + local shape inference
+    ↓
+v0.2.2
+TypeCheckPass + tensor operation validation
+    ↓
+v0.2.3
+TypeShapePass + SimplifyPass pipeline
+```
+
+三个版本的 backend 都仍是占位实现：生成的 `.ptx` 或 PTX 字符串只包含 opcode 注释，不是可由 CUDA Driver API 加载的 PTX module。v0.2 系列的重点是 frontend、类型/shape 和 pass pipeline，而不是 GPU 执行。
+
+## v0.2.1 基础版本
 
 Mini Triton v0.2.1 是一个教学型 GPU DSL 编译器原型。本版本开始在 IR 中保留 Triton 风格的整块 tensor 语义：`arange()` 创建索引 tensor，`load()` 返回数据 tensor，`x + y` 表示 tensor 加法，`store()` 写回整个 tensor。
 
@@ -40,7 +69,7 @@ FunctionIR
 PTXBackend().emit(ir)
 ```
 
-## 文件结构
+## v0.2.1 文件结构
 
 | 文件或目录 | 作用 |
 | --- | --- |
@@ -55,7 +84,7 @@ PTXBackend().emit(ir)
 
 `__pycache__/` 是 Python 自动生成的字节码缓存，不属于编译器实现。
 
-## Demo DSL
+## v0.2.1 Demo DSL
 
 `demo.py` 编译下面的源码：
 
@@ -77,7 +106,7 @@ offsets = [0, 1, ..., 255]
 
 与真正的 Triton kernel 相比，当前 DSL 没有 `program_id`，因此只描述从 offset 0 开始的一个 tensor block；它还没有 N 和 mask，无法处理任意长度或尾部越界。
 
-## 类型系统
+## v0.2.1 类型系统
 
 ### PointerType
 
@@ -111,7 +140,7 @@ tensor<[256]xf32>  # 256 个 FP32 数据元素
 
 这是 IR 层的逻辑类型，当前 backend 还没有决定它应如何映射到 CUDA thread、warp、寄存器或向量指令。
 
-## IR 结构
+## v0.2.1 IR 结构
 
 ### Value
 
@@ -156,7 +185,7 @@ func @add_kernel
   tensor_store Z:ptr %0:tensor<[256]xi32> %3:tensor<[256]xf32>
 ```
 
-## Frontend lowering
+## v0.2.1 Frontend lowering
 
 `Frontend.compile()` 使用 `ast.parse()` 解析源码，并选择第一个 `FunctionDef`。它遍历函数参数，把参数注册到 symbol table，然后逐条编译函数体。
 
@@ -173,7 +202,7 @@ func @add_kernel
 
 只有 `ast.Add` 会被处理，其他二元运算最终会落入不支持路径。Frontend 也没有检查 tensor shape、dtype 或 pointer/value operand 是否兼容。
 
-## Backend 当前状态
+## v0.2.1 Backend 当前状态
 
 `PTXBackend.emit()` 目前只输出版本注释和每条 IR 的 opcode：
 
@@ -197,7 +226,7 @@ func @add_kernel
 - tensor add 如何针对每个 lane 生成 FP32 指令。
 - 多个 program 如何利用 `blockIdx` 覆盖完整输入。
 
-## Compiler API
+## v0.2.1 Compiler API
 
 公开编译入口是：
 
@@ -218,29 +247,39 @@ ir, ptx = compile_kernel(src, "add_kernel")
 
 传入的 `name` 控制输出文件名，IR 中的函数名仍来自 DSL 源码。输出路径相对于执行命令时的当前工作目录。
 
-## 运行
+## 运行各版本
 
-本版本只使用 Python 标准库，不需要 Triton、PyTorch、CUDA Toolkit 或 NVIDIA GPU。建议从版本目录运行：
+三个版本都只使用 Python 标准库，不需要 Triton、PyTorch、CUDA Toolkit 或 NVIDIA GPU。从仓库根目录可分别运行：
+
+```bash
+conda run -n main python mini-triton/mini-triton-v0.2/demo.py
+conda run -n main python mini-triton/mini-triton-v0.2/mini-triton-v0.2.2/demo.py
+conda run -n main python mini-triton/mini-triton-v0.2/mini-triton-v0.2.3/demo.py
+```
+
+不过，v0.2.1 和 v0.2.2 的输出目录相对于当前工作目录。为了让生成文件保存在对应版本内，推荐进入各目录后运行：
 
 ```bash
 cd mini-triton/mini-triton-v0.2
-python demo.py
-```
+conda run -n main python demo.py
 
-如果系统 Python 不在 PATH 中，可使用仓库当前 Conda 环境：
+cd mini-triton-v0.2.2
+conda run -n main python demo.py
 
-```bash
+cd ../mini-triton-v0.2.3
 conda run -n main python demo.py
 ```
 
-程序会打印 Tensor IR 与占位 PTX，并更新：
+v0.2.1 和 v0.2.2 会打印 Tensor IR 与占位 PTX，并更新各自的：
 
 ```text
 output/add_kernel.tir
 output/add_kernel.ptx
 ```
 
-## 当前限制
+v0.2.3 只打印结果，不创建 output 文件。各版本的详细 API、检查规则和限制请阅读对应 README。
+
+## v0.2.1 当前限制
 
 - 仅支持第一个 Python 函数；找不到函数时没有明确错误信息。
 - 所有函数参数都被视为无元素类型的 pointer，尚不支持标量参数。
@@ -252,6 +291,16 @@ output/add_kernel.ptx
 - `Frontend` 实例重复编译时不会清空 ops、args、env 和 SSA id。
 - Backend 只是 opcode dump，尚未生成真实 PTX。
 - 没有优化 pass、runtime、数值正确性测试和性能 benchmark。
+
+## v0.2 系列共同限制
+
+- 只覆盖固定 tensor block 的 load/add/store，没有 program id、grid、N 或 mask。
+- PointerType 没有元素 dtype，load 固定产生 FP32 tensor。
+- 没有定义 tensor block 到 CUDA thread/warp 的 layout。
+- 类型与 shape 检查仍不完整；v0.2.3 甚至移除了 v0.2.2 的 load 检查。
+- 没有广播、归约、多维 layout、控制流或完整诊断系统。
+- 所有 backend 都只输出注释，不能生成或运行真实 GPU kernel。
+- 没有 runtime、GPU correctness test 或性能 benchmark。
 
 ## 下一步建议
 
