@@ -1,5 +1,14 @@
 ## transpose
 
+`transpose.cu` 在同一程序中比较 copy、naive transpose、coalesced transpose、消除 shared-memory bank conflict、diagonal block 重排以及 fine/coarse-grained 等版本，并执行结果验证和带宽测试。
+
+```bash
+nvcc -O3 transpose.cu -o transpose
+./transpose
+```
+
+默认 tile 和矩阵尺寸定义在源码顶部。修改尺寸后需确认网格覆盖、边界条件及 shared-memory 布局仍然成立。
+
 #### CUDA内存
 ```c++
 threads(TILE_DIM, BLOCK_ROWS)

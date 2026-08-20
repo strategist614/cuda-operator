@@ -1,5 +1,16 @@
 ## 算子优化思路
 
+本目录包含 Attention、GEMM、LayerNorm、RMSNorm、Softmax 和图像 HWC→CHW 归一化。多数算子按 `V0`、`V1`……保存优化演进，每个版本应先与 CPU reference 比较正确性，再在固定输入与充分 warm-up 下测量 kernel 时间。
+
+| 子目录 | 主要优化主题 |
+| --- | --- |
+| `GEMM/` | shared/register/warp tiling、向量化、bank conflict、异步拷贝 |
+| `Attention/` | 分阶段 attention、online softmax、tiled/FlashAttention |
+| `LayerNorm/` | warp reduction、寄存器复用、Welford、向量化访存 |
+| `RMSNorm/` | sum-of-squares reduction 与向量化 |
+| `SoftMax/` | 数值稳定、block/warp reduction、online normalizer |
+| `hwc_to_chw_norm/` | layout conversion、类型转换与 normalization 融合 |
+
 ```
 先写对
 ↓

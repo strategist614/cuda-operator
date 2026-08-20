@@ -1,5 +1,14 @@
 ## Reduction
 
+该示例对比从 `reduce0` 到 `reduce7` 的多种求和归约策略，并包含 cooperative groups 的多 warp 版本。`reduction.cpp` 负责参数解析、数据准备、kernel 调度和验证，`reduction_kernel.cu` 保存设备端实现。
+
+```bash
+nvcc -O3 reduction.cpp reduction_kernel.cu -o reduction
+./reduction
+```
+
+运行参数与支持的数据类型以 `reduction.cpp` 中的命令行解析为准。阅读代码时建议按版本号观察：分支/取模、连续线程、首次加载时累加、循环展开、warp shuffle 的变化。
+
 ### Sum
 `CUDA` 里，一个 `warp` 通常有 32 个线程。
 

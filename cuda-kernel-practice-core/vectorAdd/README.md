@@ -1,6 +1,15 @@
 ### VectorAdd
+
+`kernel.cu` 展示完整的 host/device 内存分配、H2D/D2H 拷贝、kernel launch、同步、验证与释放流程。`benchmark.py` 用于运行或整理性能实验。
+
+```bash
+nvcc -O3 kernel.cu -o vectorAdd
+./vectorAdd
+```
+
+如使用 benchmark，请先阅读脚本中的可执行文件路径与运行参数，并确保 Python 环境可找到已编译程序。
 * `cudaMalloc` 是在 `GPU` 中分配显存的
-* `lockIdx.x` 表示`block`在整个`grid`的编号
+* `blockIdx.x` 表示`block`在整个`grid`的编号
 * `blockDim.x` 表示每个`block`有多少个线程
 * `blockIdx.x * blockDim.x` 表示当前到多少个`block`
 * `blockIdx.x * blockDim.x + threadIdx.x` 表示偏移了多少个线程

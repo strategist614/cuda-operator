@@ -1,5 +1,14 @@
 ## HWC to CHW
 
+`hwc_to_chw_norm.cu` 将 `[H,W,3]` 的 `uint8` 图像转换为 `[3,H,W]` 的 FP32 张量，并在同一个 kernel 中完成 `/255`、减均值和除标准差。程序包含 CPU reference、CUDA 结果验证和简单计时。
+
+```bash
+nvcc -O3 hwc_to_chw_norm.cu -o hwc_to_chw_norm
+./hwc_to_chw_norm
+```
+
+当前实现固定 3 通道，每个线程处理一个像素。接入推理流水线时，应复用 device buffer、使用调用方 stream，并尽量让结果直接留在 GPU 上供下游模型消费。
+
 一个像素连续存入 `3` 个通道
 
 ```

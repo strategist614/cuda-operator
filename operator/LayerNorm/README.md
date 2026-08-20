@@ -1,5 +1,23 @@
 ## LayerNorm
 
+本目录实现按行 LayerNorm：计算均值和方差后执行 `y = (x - mean) / sqrt(var + eps) * gamma + beta`。源码包含 CPU reference、正确性检查和计时。
+
+| 文件 | 说明 |
+| --- | --- |
+| `naive.cu` | 基础 CUDA 实现 |
+| `layernorm_naive_bench.cu` | naive benchmark |
+| `optimization_v1_wrap_shuffle.cu` | warp shuffle + block reduction（文件名沿用现状） |
+| `optimization_v2.cu` | 每线程缓存 4 个元素到寄存器 |
+| `optimization_v3_welford.cu` | Welford 单遍统计量合并 |
+| `optimization_v4_memory.cu` | 进一步优化访存布局/向量化 |
+
+```bash
+nvcc -O3 optimization_v4_memory.cu -o layernorm_v4
+./layernorm_v4
+```
+
+当前优化版本主要针对 `cols=1024`、`block=256` 的配置。改变列数时需重审每线程元素数、尾部 mask、warp 数和 shared-memory 大小。
+
 ### 安装 nsys
 ```
 apt update
