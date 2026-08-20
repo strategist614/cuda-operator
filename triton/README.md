@@ -7,6 +7,9 @@
 | `add.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
 | `relu.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
 | `sigmoid.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
+| `relu_benchmark.py` | 扫描 ReLU block size，统计寄存器、时间和有效带宽，并导出汇编 |
+| `relu_256.ptx` | `BLOCK_SIZE=256` 时导出的 PTX |
+| `relu_256.sass` | `BLOCK_SIZE=256` 时导出的 SASS |
 
 ## Add
 
@@ -37,6 +40,41 @@ y[i] = max(x[i], 0)
 ```bash
 python relu.py
 ```
+
+### ReLU benchmark
+
+`relu_benchmark.py` 使用 `N = 16 × 1024 × 1024` 个 FP32 元素，对下面几种配置进行测试：
+
+```text
+BLOCK_SIZE = 64, 128, 256, 512, 1024
+num_warps  = 4
+```
+
+每个配置先启动一次 kernel 以触发编译并取得编译结果，再用 `triton.testing.do_bench` 测量重复执行时间。脚本输出：
+
+- `BLOCK`：每个 Triton program 处理的元素数量。
+- `regs`：编译后的 kernel 每线程使用的寄存器数量。
+- `time`：kernel 执行时间，单位为毫秒。
+- `bw`：根据一次读取和一次写入计算的有效显存带宽，单位为 GB/s。
+
+有效带宽的计算方式为：
+
+```text
+bytes_moved = 2 × N × sizeof(float)
+GB/s = bytes_moved / time_seconds / 1e9
+```
+
+这里的系数 2 表示读取 `x` 和写入 `y`。这是便于比较不同配置的算法有效带宽，不等同于 profiler 统计的所有实际 DRAM 流量。
+
+运行 benchmark：
+
+```bash
+python relu_benchmark.py
+```
+
+脚本还会在 `BLOCK_SIZE=256` 时将编译结果保存为 `relu_256.ptx` 和 `relu_256.sass`，并打印 SASS 中包含 `LDG` 或 `STG` 的 global-memory 指令。生成文件会写入执行命令时的当前工作目录，因此建议在 `triton/` 目录内运行。
+
+> `kernel._init_handles()` 和 `kernel.asm` 属于较底层的编译结果接口，可能随 Triton 版本变化；本仓库当前环境使用 Triton 3.7.1。
 
 ## Sigmoid
 
@@ -98,7 +136,7 @@ mask        = offsets < n_elements
 program 数量 = ceil(n_elements / BLOCK_SIZE)
 ```
 
-mask 用于保护最后一个不完整的数据块，避免越界读写。示例假设输入位于 CUDA 且内存连续；Add 还要求两个输入 shape 相同。这些脚本目前用于正确性学习，没有包含 warm-up、重复计时或与 PyTorch 的性能 benchmark。
+mask 用于保护最后一个不完整的数据块，避免越界读写。示例假设输入位于 CUDA 且内存连续；Add 还要求两个输入 shape 相同。`add.py`、`relu.py` 和 `sigmoid.py` 主要用于正确性学习；目前独立的性能测试集中在 `relu_benchmark.py`。
 
 ## 为什么这里不需要显式向量化加载
 
@@ -116,6 +154,15 @@ x = tl.load(x_ptr + offsets, mask=mask)
 ```
 
 一次 `tl.load` 描述了整个 program 对一批连续元素的加载。编译器可以根据地址连续性、数据类型、对齐和目标 GPU，把这些访问降级为合适的向量化指令与合并的 global-memory transactions。因此，这三个 kernel 已经表达了批量连续访问，没有必要为了模仿 CUDA 再手写 `float4`。
+
+`relu_benchmark.py` 导出的 `relu_256.sass` 可以直接验证这一点。在当前编译环境下，其中的主要 global-memory 指令为：
+
+```text
+LDG.E.64.SYS
+STG.E.64.SYS
+```
+
+`.64` 表示该机器指令按 64 bit（两个 FP32 元素）执行加载和存储。也就是说，Triton 源码虽然没有显式写 `float2`/`float4`，后端仍根据 program 布局生成了向量化访存。具体宽度依赖编译配置、Triton 版本和目标 GPU，不能假设所有环境都会得到完全相同的指令。
 
 对这三个逐元素算子来说，连续 offsets 还带来以下好处：
 

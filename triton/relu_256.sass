@@ -1,0 +1,28 @@
+Function:relu_kernel
+--:-:-:-:2	IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28];
+--:-:0:-:1	S2R R0, SR_TID.X;
+--:-:-:-:1	IMAD.MOV.U32 R7, RZ, RZ, 0x4;
+--:-:-:-:1	BMOV.32.CLEAR RZ, B0;
+--:-:-:-:1	BSSY B0, 0x100;
+--:-:1:-:1	S2R R3, SR_CTAID.X;
+01:-:-:Y:5	IMAD.SHL.U32 R0, R0, 0x2, RZ;
+--:-:-:Y:4	LOP3.LUT R0, R0, 0xfe, RZ, 0xc0, !PT;
+02:-:-:-:2	LEA R0, R3, R0, 0x8;
+--:-:-:-:2	CS2R R2, SRZ;
+--:-:-:-:1	ISETP.GE.AND P0, PT, R0.reuse, c[0x0][0x170], PT;
+--:-:-:Y:b	IMAD.WIDE R4, R0, R7, c[0x0][0x168];
+--:-:-:-:5	@P0 BRA LBB0;
+--:-:-:Y:8	IMAD.WIDE R2, R0, R7, c[0x0][0x160];
+--:-:5:-:2	LDG.E.64.SYS R2, [R2];
+LBB0:
+--:-:-:-:5	BSYNC B0;
+32:-:-:-:2	FMNMX R2, RZ, R2, !PT;
+--:-:-:-:1	FMNMX R3, RZ, R3, !PT;
+--:-:-:-:7	@P0 EXIT;
+--:-:-:-:1	STG.E.64.SYS [R4], R2;
+--:-:-:-:5	EXIT;
+LBB1:
+--:-:-:Y:0	BRA LBB1;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+
