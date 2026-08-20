@@ -4,8 +4,8 @@
 
 .visible .entry add_kernel()
 {
-    mov.u32 %r1, %ctaid.x;
-    mov.u32 %r2, %tid.x;
+    mov.u32 %r1,%ctaid.x;
+    mov.u32 %r2,%tid.x;
     add.u32 %r3,%r1,%r2;
     // ld.global.f32
     // st.global.f32

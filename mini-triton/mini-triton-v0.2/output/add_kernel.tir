@@ -1,0 +1,9 @@
+func @add_kernel
+  arg X:ptr
+  arg Y:ptr
+  arg Z:ptr
+  %0:tensor<[256]xi32> = arange 256
+  %1:tensor<[256]xf32> = tensor_load X:ptr %0:tensor<[256]xi32>
+  %2:tensor<[256]xf32> = tensor_load Y:ptr %0:tensor<[256]xi32>
+  %3:tensor<[256]xf32> = tensor_add %1:tensor<[256]xf32> %2:tensor<[256]xf32>
+  tensor_store Z:ptr %0:tensor<[256]xi32> %3:tensor<[256]xf32>

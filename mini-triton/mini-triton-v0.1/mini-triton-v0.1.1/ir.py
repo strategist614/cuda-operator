@@ -17,4 +17,8 @@ class FunctionIR:
     ops: list
 
     def dump(self):
-        return "\n".join(str(x) for x in self.ops)
+        out=[f"func @{self.name}"]
+        for op in self.ops:
+            lhs=f"{op.result.name} = " if op.result else ""
+            out.append(f"  {lhs}{op.opcode} {op.args}")
+        return "\n".join(out)
