@@ -99,3 +99,29 @@ program 数量 = ceil(n_elements / BLOCK_SIZE)
 ```
 
 mask 用于保护最后一个不完整的数据块，避免越界读写。示例假设输入位于 CUDA 且内存连续；Add 还要求两个输入 shape 相同。这些脚本目前用于正确性学习，没有包含 warm-up、重复计时或与 PyTorch 的性能 benchmark。
+
+## 为什么这里不需要显式向量化加载
+
+在 CUDA C++ 中，常用 `float4` 让一个线程一次加载或存储 4 个连续的 `float`：
+
+```cpp
+float4 value = reinterpret_cast<const float4*>(input)[index];
+```
+
+本目录的 Add、ReLU 和 Sigmoid 没有写类似的显式向量类型，因为 Triton 的编程模型不同。下面的 `offsets` 不是单个标量下标，而是一个包含 `BLOCK_SIZE` 个连续下标的 Triton tensor：
+
+```python
+offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+x = tl.load(x_ptr + offsets, mask=mask)
+```
+
+一次 `tl.load` 描述了整个 program 对一批连续元素的加载。编译器可以根据地址连续性、数据类型、对齐和目标 GPU，把这些访问降级为合适的向量化指令与合并的 global-memory transactions。因此，这三个 kernel 已经表达了批量连续访问，没有必要为了模仿 CUDA 再手写 `float4`。
+
+对这三个逐元素算子来说，连续 offsets 还带来以下好处：
+
+- 相邻执行单元访问相邻地址，便于 global memory coalescing。
+- Add 的两个输入和一个输出都按相同连续下标访问。
+- ReLU、Sigmoid 在加载后直接计算并写回，不需要 shared memory 做数据复用。
+- mask 可以安全处理元素数量不是 `BLOCK_SIZE` 整数倍的尾部。
+
+不过，不显式使用 `float4` 不代表性能一定自动达到最优。实际优化时仍需 benchmark，并根据 dtype、shape 和 GPU 调整 `BLOCK_SIZE`、`num_warps`；对于二维或非连续数据，还需要设计合适的 block 布局，并可通过 `tl.multiple_of`、`tl.max_contiguous` 等提示向编译器提供已知的对齐或连续性信息。是否生成理想访存指令，应以 Triton 编译结果和 profiler 数据为准。
