@@ -45,3 +45,17 @@ __global__ void gemm_naive(
     }
 }
 
+#define BM 16
+#define BN 16
+#define BK 16
+
+__global__ void gemm_block_tile(
+    const float* A,
+    const float* B,
+    float* C,
+    int M,
+    int N,
+    int K
+){
+
+}

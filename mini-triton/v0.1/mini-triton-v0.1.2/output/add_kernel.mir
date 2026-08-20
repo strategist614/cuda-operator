@@ -1,0 +1,6 @@
+func @add_kernel
+  %0 = program_id ()
+  %1 = lane_id ()
+  %2 = add (Value(name='%0', ty='i32'), Value(name='%1', ty='i32'))
+  %3 = load ('X', Value(name='%2', ty='i32'))
+  store ('Z', Value(name='%2', ty='i32'), Value(name='%3', ty='f32'))
