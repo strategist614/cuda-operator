@@ -2,6 +2,18 @@
 
 本目录保存 Mini Triton v0.2 系列的三个教学版本。整个系列围绕 tensor-level IR 展开：先在 v0.2.1 建立 Tensor IR，再在 v0.2.2 接入类型检查，最后由 v0.2.3 加入明确的 type/shape 与 simplify pass pipeline。
 
+## 学习目标
+
+v0.2 系列关注的是“如何在编译器 IR 中表达一整块 tensor”，而不是立即生成高性能 GPU 指令。通过三个版本可以观察：
+
+1. Python 函数参数如何进入 kernel IR。
+2. `arange`、`load`、`+`、`store` 如何变成 tensor operation。
+3. shape 和 dtype 如何沿 operation 传播。
+4. 类型检查为什么适合放在独立 pass 中。
+5. frontend、verification、optimization、backend 如何组成编译 pipeline。
+
+本系列不是官方 Triton 的子集或兼容实现；DSL、IR 和类型字符串都是仓库中的教学设计。
+
 ## 版本导航
 
 | 版本 | 位置 | 主要变化 | 输出行为 |
@@ -11,6 +23,20 @@
 | v0.2.3 | [`mini-triton-v0.2.3/`](mini-triton-v0.2.3/) | tuple shape、TypeShapePass、SimplifyPass；v0.2 收尾版本 | 只返回并打印 IR/PTX，不自动写文件 |
 
 建议按 v0.2.1 → v0.2.2 → v0.2.3 的顺序阅读。每个子版本都是独立的小型 Python 项目，使用各自目录中的同名模块，不应跨目录混合导入。
+
+## 能力矩阵
+
+| 能力 | v0.2.1 | v0.2.2 | v0.2.3 |
+| --- | --- | --- | --- |
+| 从函数签名提取 pointer 参数 | 支持 | 支持 | 支持 |
+| `arange(size)` tensor | list shape | list shape | tuple shape |
+| `tensor_load` / `tensor_add` / `tensor_store` | 支持 | 支持 | 支持 |
+| add shape/dtype 检查 | 不支持 | `TypeCheckPass` | `TypeShapePass` |
+| load pointer/offset 检查 | 不支持 | 支持 | 不支持 |
+| 独立 simplify/optimizer pass | 无 | 无 | 有接口，当前为空实现 |
+| 自动保存 IR/PTX | 支持 | 支持 | 不支持 |
+| 真实 PTX codegen | 不支持 | 不支持 | 不支持 |
+| CUDA runtime/GPU 执行 | 不支持 | 不支持 | 不支持 |
 
 ## 系列演进
 
@@ -278,6 +304,18 @@ output/add_kernel.ptx
 ```
 
 v0.2.3 只打印结果，不创建 output 文件。各版本的详细 API、检查规则和限制请阅读对应 README。
+
+### 快速验证全部版本
+
+从仓库根目录运行下面的命令，可以确保 v0.2.1/v0.2.2 的输出写回各自目录，同时避免同名 Python 模块互相干扰：
+
+```bash
+(cd mini-triton/mini-triton-v0.2 && conda run -n main python demo.py)
+(cd mini-triton/mini-triton-v0.2/mini-triton-v0.2.2 && conda run -n main python demo.py)
+(cd mini-triton/mini-triton-v0.2/mini-triton-v0.2.3 && conda run -n main python demo.py)
+```
+
+预期三个命令都能打印 `func @add_kernel` 及 `arange`、`tensor_load`、`tensor_add`、`tensor_store`。这只能证明 AST→IR→占位 backend 流程可运行，不代表 GPU kernel 已经生成或执行。
 
 ## v0.2.1 当前限制
 
