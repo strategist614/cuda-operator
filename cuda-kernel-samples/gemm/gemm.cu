@@ -1,6 +1,8 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cstdio>
+#include <mma.h>
+
 
 using namespace std;
 
@@ -224,6 +226,86 @@ __global__ void gemm_all_tile(
     }
 }
 
+using namespace nvcuda;
+
+#define BM 128
+#define BN 128
+#define BK 16
+
+__global__ void gemm_wmma(const half* A, const half* B, float* C, int M, int N, int K){
+    __shared__ half As[BM][BK];
+    __shared__ half Bs[BK][BN];
+
+    int tid = threadIdx.x;
+
+    int warp_id = tid / 32;
+
+    int warp_row = warp_id / 4;
+    int warp_col = warp_id % 4;
+
+    int block_row = blockIdx.y * BM;
+    int block_col = blockIdx.x * BN;
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    for(int bk = 0;bk < K;bk += BK){
+        for(int i = tid;i < BM * BK;i+=blockDim.x){
+            int r = i / BK:
+            int c = i % BK;
+
+            int gr = block_row + r;
+            int gc = bk + c;
+
+            As[r][c] = (gr < M && gc < K) ? A[gr * K + gc] : __float2half(0.0f);
+        }
+
+        for(int i = tid;i < BK * BN;i+=blockDim.x){
+            int r = i / BN:
+            int c = i % BN;
+
+            int gr = bk + r;
+            int gc = block_col + c;
+
+            Bs[r][c] = (gr < K && gc < N) ? A[gr * N + gc] : __float2half(0.0f);
+        }
+        __syncthreads();
+
+        for(int k=0;k<BK;k+=16)
+        {
+
+
+            wmma::fragment<wmma::matrix_a,16,16,16, half, wmma::row_major> a_frag;
+
+            wmma::fragment<wmma::matrix_b,16,16,16, half, wmma::col_major> b_frag;
+
+            int warp_m = warp_row*16;
+
+
+            int warp_n = warp_col*16;
+
+            wmma::load_matrix_sync( a_frag, &As[warp_m][k], BK);
+
+            wmma::load_matrix_sync( b_frag, &Bs[k][warp_n], BN);
+
+            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+
+        __syncthreads();
+
+    }
+    int c_row = block_row + warp_row*16;
+
+
+    int c_col = block_col + warp_col*16;
+
+    if(c_row<M && c_col<N)
+    {
+        wmma::store_matrix_sync( &C[c_row*N+c_col], c_frag, N, wmma::mem_row_major);
+    }
+}
+
 int main()
 {
     int N = 1024;
@@ -231,7 +313,7 @@ int main()
     int bytes = M * N * sizeof(float);
     float *h_A = new float[M * N];
     float *h_B = new float[N * M];   
-    float *h_C = new float[M * M];
+    float *h_C = new float[M * M];·
 
     float *d_A = nullptr;
     float *d_B = nullptr;
