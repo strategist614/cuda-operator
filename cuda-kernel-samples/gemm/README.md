@@ -23,6 +23,107 @@ C: [M, N]
 C[row, col] = sum(A[row, k] * B[k, col]), k = 0 ... K - 1
 ```
 
+## `gemm.cu` 汇总代码说明
+
+[`gemm.cu`](gemm.cu) 集中保留了 3 个 FP32 GEMM kernel，展示从直接计算、shared-memory 分块到寄存器分块的优化过程。它只包含 device kernel，不包含头文件、分块常量、host 端内存管理、kernel launch 和 `main()`，因此不能作为独立程序直接编译。可运行的完整版本分别位于 `01_gemm_naive.cu`、`02_gemm_shared_tile.cu` 和 `03_gemm_register_tile.cu`。
+
+三个 kernel 使用相同的接口：
+
+```cpp
+const float* A;  // [m, k_size]
+const float* B;  // [k_size, n]
+float* C;        // [m, n]
+```
+
+矩阵均为行主序，计算 `C = A x B`。当前接口没有 `alpha`、`beta`、转置选项或 batch 维度，计算结果会直接覆盖 `C`。
+
+### `gemm_naive`
+
+每个二维线程负责计算 `C` 的一个元素。线程遍历整个 K 维，每次直接从 global memory 读取一个 A 元素和一个 B 元素：
+
+```text
+thread(row, col)
+    -> sum = A[row, 0] * B[0, col] + ...
+    -> C[row, col] = sum
+```
+
+建议使用二维 block，例如 `dim3 block(16, 16)`，grid 在 M、N 两个方向分别向上取整。这个版本结构最简单，可作为正确性基线，但没有显式的数据复用。
+
+> 注意：`gemm.cu` 当前把列坐标写成了 `blockIdx.x * blockIdx.x + threadIdx.x`，应为 `blockIdx.x * blockDim.x + threadIdx.x`。在修正之前，多数 grid 配置会产生错误或重复的列索引。独立示例 `01_gemm_naive.cu` 中已使用正确写法。
+
+### `gemm_shared_tile`
+
+每个 `TILE x TILE` block 负责 C 的一个同尺寸输出块。计算沿 K 维分段进行：
+
+1. block 内线程协作把 A、B 的 tile 搬入 `As`、`Bs`。
+2. 越界元素填 0，因此 M、N、K 不必是 `TILE` 的整数倍。
+3. 同步后，每个线程复用 shared memory 中的数据完成 `TILE` 次乘加。
+4. 遍历完所有 K tile 后，将结果写回 C。
+
+该 kernel 要求定义编译期常量 `TILE`，并使用 `dim3 block(TILE, TILE)`。shared memory 用量为：
+
+```text
+2 x TILE x TILE x sizeof(float)
+```
+
+> 注意：每轮乘加结束后还需要一次 `__syncthreads()`，确保所有线程读取完当前 tile 后，才允许下一轮覆盖 `As` 和 `Bs`。`gemm.cu` 当前缺少这次同步，存在竞态；`02_gemm_shared_tile.cu` 已包含完整的两次同步。
+
+### `gemm_register_tile`
+
+这个版本使用三级分块，让一个线程计算多个 C 元素：
+
+| 层级 | 尺寸 | 作用 |
+| --- | --- | --- |
+| Block tile | `BM x BN x BK` | 一个 block 分阶段处理的 A、B、C 区域 |
+| Warp tile | `WM x WN` | 一个 warp 负责的输出区域 |
+| Thread tile | `TM x TN` | 一个线程保存在寄存器中的累加区域 |
+
+每轮 K 分块的执行过程为：
+
+```text
+全局内存 A/B
+    -> block 协作加载 As[BM][BK]、Bs[BK][BN]
+    -> 每个线程读取 a_frag[TM]、b_frag[TN]
+    -> 外积累加到 acc[TM][TN]
+    -> 下一个 BK 分块
+    -> 带边界检查写回 C
+```
+
+源码中的 lane 映射把 32 个线程拆为 `8 x 4`：
+
+```cpp
+lane_row = lane / 4;  // 0..7
+lane_col = lane % 4;  // 0..3
+```
+
+因此当前实现要求 `WM = 8 x TM`、`WN = 4 x TN`。`warp_row = warp_id / 2`、`warp_col = warp_id % 2` 又把 4 个 warp 排成 `2 x 2`，所以还要求 `BM = 2 x WM`、`BN = 2 x WN`，并以 128 个线程启动一个 block。完整示例采用：
+
+```cpp
+BM = 32; BN = 32; BK = 8;
+WM = 16; WN = 16;
+TM = 2;  TN = 4;
+THREADS = 128;
+```
+
+对应的 launch 配置为：
+
+```cpp
+dim3 block(THREADS);
+dim3 grid((n + BN - 1) / BN,
+          (m + BM - 1) / BM);
+gemm_register_tile<<<grid, block>>>(A, B, C, m, n, k_size);
+```
+
+相比 shared-memory tiling，每个线程用 `acc[TM][TN]` 保存多个输出，A fragment 和 B fragment 能在寄存器中重复参与乘加，从而进一步减少每个输出元素对应的 shared-memory 读取次数。代价是寄存器占用增加，并且分块参数必须满足上述线程映射约束。
+
+### 三个 kernel 的区别
+
+| Kernel | 每线程输出 | 数据复用位置 | 主要限制 |
+| --- | ---: | --- | --- |
+| `gemm_naive` | 1 | 主要依赖硬件 cache | `gemm.cu` 中列索引需修正 |
+| `gemm_shared_tile` | 1 | Shared memory | block 必须为 `TILE x TILE`；需补第二次同步 |
+| `gemm_register_tile` | `TM x TN` | Shared memory + registers | 需满足固定的 warp/lane 分块关系 |
+
 当前 4 个程序统一使用：
 
 ```cpp
