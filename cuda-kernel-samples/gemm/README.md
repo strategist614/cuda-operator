@@ -1,12 +1,14 @@
 # CUDA GEMM 优化示例
 
-本目录包含 4 个可独立编译、运行的 CUDA GEMM 示例，按照以下路线逐步优化：
+本目录包含 6 个可独立编译、运行的 CUDA GEMM 示例，按照以下路线逐步优化：
 
 ```text
 Naive FP32
     -> Shared-memory tiling FP32
     -> Warp/register tiling FP32
     -> WMMA Tensor Core（FP16 输入、FP32 累加）
+    -> WMMA warp reuse + vectorized load + direct store
+    -> Ampere cp.async double buffering
 ```
 
 这些程序用于学习 GEMM kernel 的数据复用和分块方法，不是通用矩阵乘法库。当前矩阵尺寸、预热次数和计时次数均为编译期常量。
@@ -25,7 +27,7 @@ C[row, col] = sum(A[row, k] * B[k, col]), k = 0 ... K - 1
 
 ## `gemm.cu` 汇总代码说明
 
-[`gemm.cu`](gemm.cu) 集中保留了 4 个 GEMM kernel，包括 3 个 FP32 版本和 1 个 WMMA 版本，展示从直接计算、shared-memory 分块、寄存器分块到 Tensor Core 的优化过程。它只包含 device kernel，不包含头文件、分块常量、host 端内存管理、kernel launch 和 `main()`，因此不能作为独立程序直接编译。可独立运行的完整程序位于 `01_gemm_naive.cu`、`02_gemm_shared_tile.cu`、`03_gemm_register_tile.cu` 和 `04_gemm_wmma.cu`。
+[`gemm.cu`](gemm.cu) 集中保留了前 4 个 GEMM kernel，包括 3 个 FP32 版本和 1 个 WMMA 版本，展示从直接计算、shared-memory 分块、寄存器分块到 Tensor Core 的优化过程。它只包含 device kernel，不包含头文件、分块常量、host 端内存管理、kernel launch 和 `main()`，因此不能作为独立程序直接编译。可独立运行的完整程序位于 `01_gemm_naive.cu`、`02_gemm_shared_tile.cu`、`03_gemm_register_tile.cu`、`04_gemm_wmma.cu`、`05_gemm_wmma_optimized.cu` 和 `06_gemm_wmma_cp_async.cu`。
 
 前三个 FP32 kernel 使用相同的接口：
 
@@ -296,7 +298,7 @@ __global__ void gemm_wmma(const half* A, const half* B, float* C, int m, int n, 
 }
 ```
 
-当前 4 个程序统一使用：
+当前 6 个程序统一使用：
 
 ```cpp
 M = 512;
@@ -314,6 +316,8 @@ REPEATS = 20;
 | `02_gemm_shared_tile.cu` | `shared_tile_fp32` | `TILE=16` | A、B 按 `16 x 16` 子块加载到 shared memory，每个线程计算 C 的一个元素 |
 | `03_gemm_register_tile.cu` | `register_tile_fp32` | `BM=32, BN=32, BK=8`，128 threads/block | 4 个 warp 覆盖一个 `32 x 32` 输出块，每线程用寄存器计算 `TM x TN = 2 x 4` 个元素 |
 | `04_gemm_wmma.cu` | `wmma_fp16_acc_fp32` | `BM=64, BN=64, BK=16`，16 warps/block | 每个 warp 通过 WMMA 计算一个 `16 x 16 x 16` tile，FP16 输入、FP32 accumulator 和输出 |
+| `05_gemm_wmma_optimized.cu` | `wmma_optimized_fp16_acc_fp32` | `BM=64, BN=64, BK=16`，8 warps/block | 每个 warp 计算 `16 x 32`，复用 A fragment，向量化加载，并让完整输出 tile 直接写回 global memory |
+| `06_gemm_wmma_cp_async.cu` | `wmma_cp_async_fp16_acc_fp32` | `BM=64, BN=64, BK=32`，8 warps/block，`sm_80+` | `cp.async` 双缓冲下一块 A/B，当前 shared stage 同时执行 WMMA；针对对齐尺寸的 fast kernel |
 
 ### 1. Naive FP32
 
@@ -384,6 +388,69 @@ A、B tile 先加载到 shared memory。每个 warp 负责一个 `16 x 16` 输�
 
 WMMA 需要支持 Tensor Core 的 GPU。示例编译目标为 `sm_75`；在其他 GPU 上应把 `-arch` 改成对应的 compute capability。
 
+### 5. Optimized WMMA Tensor Core
+
+05 保持 04 的 `64 x 64 x 16` block tile、FP16 输入和 FP32 accumulator，但重新安排了 warp 工作量：
+
+```text
+04: 16 warps/block x 每 warp 1 个 16 x 16 输出 tile
+05:  8 warps/block x 每 warp 2 个 16 x 16 输出 tile
+                         = 每 warp 负责 16 x 32
+```
+
+每个 warp 只加载一次 A fragment，然后与两个相邻的 B fragment 分别执行 `mma_sync`。这样可以把 A fragment 的 WMMA load 次数减半，同时把 block 线程数从 512 降到 256。
+
+05 还包含两条 fast path：
+
+- 完整 A/B tile 使用 `int4` 搬运，每条指令加载 8 个 half（16 bytes）。`sm_75` SASS 中可以看到 `LDG.E.128`。
+- 完整的 `16 x 16` 输出 tile 由 `wmma::store_matrix_sync` 直接写入 C，避免 04 固定经过 `64 x 64` FP32 shared-memory 缓冲；只有边界 tile 才使用每 warp 独占的 shared-memory scratch。
+
+边界 M/N/K 和不满足向量对齐的 leading dimension 会自动回退到标量、带补零的 shared-memory 加载；边界输出也会先写入 scratch，再逐元素检查后写回。
+
+使用 CUDA Toolkit 13.2、目标 `sm_75` 的静态编译结果：
+
+| 版本 | Threads/block | Registers/thread | Static shared memory | Spill |
+| --- | ---: | ---: | ---: | ---: |
+| 04 | 512 | 29 | 20,480 bytes | 0 |
+| 05 | 256 | 48 | 12,288 bytes | 0 |
+
+05 的单线程寄存器数增加，因为一个 warp 同时保存两个 accumulator fragment；但 block 线程数减半，估算的 registers/block 从 14,848 降为 12,288，static shared memory 也减少 8 KiB。实际速度仍取决于 GPU 架构、矩阵尺寸、频率和 occupancy，应在目标 GPU 上用同一输入重复 benchmark，不能只根据静态资源占用判断性能。
+
+### 6. Ampere `cp.async` Double Buffering
+
+06 面向 RTX 3090（`sm_86`）及其他 Ampere 或更新架构。在 05 的每 warp `16 x 32` 输出基础上，把 K stage 从 16 扩大到 32，并为 A/B 各准备两套带 padding 的 shared-memory buffer：
+
+```text
+As[2][64][32 + 8]
+Bs[2][32][64 + 8]
+```
+
+每个 256-thread block 中，每个线程为 A 和 B 各发出一次 16-byte `cp.async`。流水过程为：
+
+```text
+prologue: cp.async tile 0 -> stage 0，等待完成
+
+loop:
+    cp.async tile N+1 -> write stage
+    对 read stage 执行两组 K=16 WMMA
+    cp.async.wait_group 0
+    __syncthreads()
+    交换 read/write stage
+```
+
+因此下一块 global→shared 传输可以和当前块的 Tensor Core 计算重叠。`BK=32` 让每个 stage 连续执行两个 WMMA K slice，也把 K-loop 的 block 同步轮数从 32 降到 16。`SKEW_HALF=8` 让 shared-memory 行跨度发生偏移，用于降低连续 WMMA load 映射到相同 bank 的风险；最终效果仍应由 Nsight Compute 的 shared wavefront/bank-conflict 指标确认。
+
+06 是固定对齐尺寸的 fast kernel：M 必须是 64 的倍数，N 必须是 64 的倍数，K 必须是 32 的倍数，并要求 `sm_80+`。它不包含 05 的边界 fallback 和 edge scratch，因此当前 `512 x 512 x 512` 会全程走无分支流水路径。
+
+使用 CUDA Toolkit 13.2、目标 `sm_86` 的静态编译结果：
+
+| 版本 | Threads/block | Registers/thread | Static shared memory | Spill |
+| --- | ---: | ---: | ---: | ---: |
+| 05 (`sm_86`) | 256 | 40 | 12,288 bytes | 0 |
+| 06 (`sm_86`) | 256 | 40 | 19,456 bytes | 0 |
+
+06 的 shared memory 增加来自双缓冲和 padding，但寄存器数没有高于 05。SASS 已确认生成 `LDGSTS.E.BYPASS.128`、`HMMA.16816.F32` 和 `DEPBAR`：异步 global→shared copy 在 HMMA 前发出，在当前 stage 计算完成后才等待下一 stage。
+
 ## 编译
 
 在当前目录执行：
@@ -393,6 +460,8 @@ nvcc -O3 -std=c++17 -arch=sm_75 01_gemm_naive.cu -o 01_gemm_naive
 nvcc -O3 -std=c++17 -arch=sm_75 02_gemm_shared_tile.cu -o 02_gemm_shared_tile
 nvcc -O3 -std=c++17 -arch=sm_75 03_gemm_register_tile.cu -o 03_gemm_register_tile
 nvcc -O3 -std=c++17 -arch=sm_75 04_gemm_wmma.cu -o 04_gemm_wmma
+nvcc -O3 -std=c++17 -arch=sm_75 05_gemm_wmma_optimized.cu -o 05_gemm_wmma_optimized
+nvcc -O3 -std=c++17 -arch=sm_86 06_gemm_wmma_cp_async.cu -o 06_gemm_wmma_cp_async
 ```
 
 ## 运行
@@ -402,13 +471,15 @@ nvcc -O3 -std=c++17 -arch=sm_75 04_gemm_wmma.cu -o 04_gemm_wmma
 ./02_gemm_shared_tile
 ./03_gemm_register_tile
 ./04_gemm_wmma
+./05_gemm_wmma_optimized
+./06_gemm_wmma_cp_async
 ```
 
 程序返回 `0` 表示正确性验证通过，返回非零值表示失败或发生 CUDA 错误。
 
 ## 正确性与计时方法
 
-4 个程序使用相同的确定性伪随机输入，随机状态种子为 `20260822`。CPU reference 使用 FP64 累加，GPU 输出与 reference 比较以下指标：
+6 个程序使用相同的确定性伪随机输入，随机状态种子为 `20260822`。CPU reference 使用 FP64 累加，GPU 输出与 reference 比较以下指标：
 
 - 最大绝对误差 `max_abs_error`。
 - 相对 L-infinity 误差 `relative_linf = max_abs_error / max(abs(reference))`。
@@ -428,7 +499,7 @@ GFLOPS = FLOPs / (average_ms x 10^6)
 
 ## 本次运行结果
 
-矩阵尺寸为 `512 x 512 x 512`，4 个 kernel 均通过正确性验证：
+以下包含原有 01–04 与本次 05 在 `512 x 512 x 512` 矩阵上的运行记录，5 个 kernel 均通过正确性验证。05 的测试环境为 NVIDIA GeForce RTX 2080（compute capability 7.5）、驱动 595.84、CUDA Toolkit 13.2，使用 `-arch=sm_75` 编译：
 
 | Kernel | 数据类型 | 最大绝对误差 | 相对 L-infinity 误差 | 平均时间 (ms) | GFLOPS | 相对 Naive 加速 | 状态 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -436,6 +507,7 @@ GFLOPS = FLOPs / (average_ms x 10^6)
 | `shared_tile_fp32` | FP32 | 0.00003662 | 0.00000104 | 0.25700480 | 1044.47644034 | 1.55x | PASS |
 | `register_tile_fp32` | FP32 | 0.00003662 | 0.00000104 | 0.15227520 | 1762.83103084 | 2.62x | PASS |
 | `wmma_fp16_acc_fp32` | FP16 / FP32 | 0.00888518 | 0.00025182 | 0.07969280 | 3368.37794509 | 5.00x | PASS |
+| `wmma_optimized_fp16_acc_fp32` | FP16 / FP32 | 0.00888518 | 0.00025182 | 0.05668160 | 4735.84860275 | 7.04x | PASS |
 
 Checksum：
 
@@ -445,6 +517,7 @@ Checksum：
 | `shared_tile_fp32` | 3203.57104091 | 3203.57244194 |
 | `register_tile_fp32` | 3203.57104091 | 3203.57244194 |
 | `wmma_fp16_acc_fp32` | 3203.57104091 | 3204.11095608 |
+| `wmma_optimized_fp16_acc_fp32` | 3203.57104091 | 3204.11095608 |
 
 前三个 FP32 kernel 的前 8 个输出值相同：
 
@@ -453,14 +526,50 @@ Checksum：
 -11.51244068, -10.26406097, -5.85342073, 14.09879971
 ```
 
-WMMA kernel 的前 8 个输出值为：
+04、05 WMMA kernel 的前 8 个输出值相同：
 
 ```text
 4.70817852, -6.73169994, 17.86602020, 4.12787628,
 -11.51045609, -10.25916195, -5.85119247, 14.09688377
 ```
 
-这组结果表明，随着 shared-memory、register tiling 和 Tensor Core 的引入，当前测试中的吞吐量依次提高。WMMA 使用 FP16 输入，因此不能把它与 FP32 kernel 视为完全相同精度下的性能对比。运行时间和 GFLOPS 依赖 GPU 型号、频率、CUDA 版本、编译目标以及系统负载，本表只记录本次运行结果。
+这组结果表明，随着 shared-memory、register tiling 和 Tensor Core 的引入，当前测试中的吞吐量依次提高。05 相比 04 的平均时间从 `0.07969280 ms` 降到 `0.05668160 ms`，时间减少 28.87%，吞吐量提高 1.406 倍；相对 naive 达到 7.04 倍加速。04、05 的误差、checksum 和前 8 个输出完全一致，说明新增的 warp tile 复用、128-bit 加载和直接写回没有改变当前输入上的数值结果。
+
+### Nsight Compute：04 与 05 对比
+
+在同一台 RTX 2080 上使用 Nsight Compute 的 `basic` 指标集采集 04、05。程序会先执行 5 次 warm-up，因此跳过前 5 次 launch，只分析随后第 1 次正式 launch：
+
+```bash
+sudo ncu --set basic --launch-skip 5 --launch-count 1 ./04_gemm_wmma
+sudo ncu --set basic --launch-skip 5 --launch-count 1 ./05_gemm_wmma_optimized
+```
+
+两个 kernel 在 profiler 下均输出 `status=PASS`。主要硬件指标如下：
+
+| Nsight Compute 指标 | 04 `gemm_wmma` | 05 `gemm_wmma_optimized` | 变化 |
+| --- | ---: | ---: | ---: |
+| Kernel duration | 73.79 us | 50.69 us | 减少 31.30% |
+| Elapsed cycles | 124,978 | 85,867 | 减少 31.29% |
+| Block size | 512 threads | 256 threads | 减半 |
+| Grid size | 64 blocks | 64 blocks | 不变 |
+| Registers/thread | 29 | 48 | 增加 19 |
+| Static shared memory/block | 20.48 KB | 12.29 KB | 减少约 40.0% |
+| Memory throughput | 30.47% | 37.36% | 提高 |
+| DRAM throughput | 4.14% | 7.19% | 提高 |
+| L1/TEX throughput | 60.95% | 74.73% | 提高 |
+| L2 throughput | 7.91% | 11.53% | 提高 |
+| Theoretical occupancy | 100% | 100% | 不变 |
+| Achieved occupancy | 69.45% | 35.01% | 受小 grid 和较少 warp 影响 |
+| Active warps/SM | 22.23 | 11.20 | 约减半 |
+| Waves/SM | 0.70 | 0.35 | 减半 |
+
+`Duration` 和 `Elapsed Cycles` 都表明 05 的单次 kernel 硬件执行时间约为 04 的 `0.687` 倍，即 Nsight Compute 采样中获得约 `1.456x` 加速。这与脱离 profiler 后 CUDA Event 测得的 05 加速趋势一致，说明性能提升并非普通运行计时的偶然波动。
+
+05 的 achieved occupancy 较低不代表资源限制变严重：两个版本的 theoretical occupancy 都是 100%。当前 `512 x 512` 输出只产生 64 个 block，而 RTX 2080 有 46 个 SM，平均只有约 1.39 个 block/SM。05 又把每个 block 从 16 个 warp 减少到 8 个 warp，因此在相同 grid 下 `Waves/SM` 和 active warps 近似减半。05 虽然同时驻留的 warp 更少，但通过每个 warp 计算两个相邻 WMMA tile、复用 A fragment、128-bit 加载、减少 shared memory 和直接写回，仍用更少的周期完成计算。
+
+注意：`ncu` 为采集 `basic` 指标执行了 9 次 replay。profiler 运行期间程序自身打印的几十毫秒 `average_ms` 包含 replay、暂停和采集开销，不能作为单次 kernel 性能；分析 NCU 结果应看报告中的 `Kernel duration`，常规性能比较则使用脱离 `ncu` 后的 CUDA Event 结果。当前问题规模还不足以填满整个 GPU，如需分析稳定的 Tensor Core、访存和 stall 指标，应使用更大的矩阵，并让 grid 包含更多 block。
+
+WMMA 使用 FP16 输入，因此不能把它与 FP32 kernel 视为完全相同精度下的性能对比。运行时间和 GFLOPS 也依赖 GPU 型号、频率、CUDA 版本、编译目标以及系统负载，本表只记录对应运行结果。06 要求 `sm_80+`，无法在当前 RTX 2080 上执行；请在 RTX 3090 上同时重新运行 04、05、06，以相同环境比较 `average_ms`、GFLOPS 与 `status`。
 
 ## 修改测试配置
 
@@ -474,4 +583,4 @@ constexpr int WARMUP = 5;
 constexpr int REPEATS = 20;
 ```
 
-当前源码带有边界加载、补零和写回判断，可以处理非 tile 整数倍的 M/N/K；修改尺寸后仍应检查程序输出的 `status` 和误差指标。
+01–05 带有边界加载、补零和写回判断，可以处理非 tile 整数倍的 M/N/K。06 是为 `cp.async` 流水准备的对齐 fast kernel，修改尺寸时必须保持 `M % 64 == 0`、`N % 64 == 0`、`K % 32 == 0`。所有版本修改尺寸后都应重新检查 `status` 和误差指标。

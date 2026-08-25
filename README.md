@@ -38,9 +38,9 @@
 - Elementwise：Add、ReLU、Sigmoid 及 `float4` 版本。
 - Reduce：sum、warp shuffle、Softmax。
 - Transpose：naive 二维矩阵转置。
-- GEMM：naive、shared-memory tile、warp/register tile 和 WMMA 四个独立版本。
+- GEMM：naive、shared-memory tile、warp/register tile、WMMA、optimized WMMA 和 Ampere `cp.async` 六个独立版本。
 
-GEMM 的 4 个独立程序均包含 host 端输入、CPU reference、误差检查和 CUDA Event benchmark，并已在 `512 x 512 x 512` 矩阵上通过验证。汇总文件 `gemm.cu` 只包含 device kernel，仍保留列索引和同步问题，不能独立编译运行；实现说明、完整汇总代码和实测结果见 [`cuda-kernel-samples/gemm/README.md`](cuda-kernel-samples/gemm/README.md)。
+6 个独立 GEMM 程序均包含 host 端输入、CPU reference、误差检查和 CUDA Event benchmark。01–05 已在 `512 x 512 x 512` 矩阵上通过验证；05 增加 warp 内多输出 tile 复用、128-bit A/B 加载和直接写回，在 RTX 2080 上相比 04 提速 1.406 倍。06 进一步面向 RTX 3090 使用 `sm_86` `cp.async` 双缓冲和 `BK=32` 流水，已通过静态编译，仍需在目标 GPU 上补充运行数据。汇总文件 `gemm.cu` 只包含 device kernel，不能独立编译运行；实现说明、完整汇总代码和实测结果见 [`cuda-kernel-samples/gemm/README.md`](cuda-kernel-samples/gemm/README.md)。
 
 ### PyTorch Custom Operator
 
@@ -104,7 +104,7 @@ Layout → Thread → Address → Register lowering → PTX simulation
 
 ### 面试练习草稿
 
-[`job-interview/`](job-interview/) 用于保存面试相关的手写 kernel 练习。当前只有 `code/gemm.cu`，其中 naive 和 shared-memory GEMM 都尚未完成，存在缺少输出参数、变量拼写和未完成加载/计算逻辑等问题，不能作为可运行示例。需要稳定版本时，应参考 [`cuda-kernel-samples/gemm/`](cuda-kernel-samples/gemm/) 中的四个独立程序。
+[`job-interview/`](job-interview/) 用于保存面试相关的手写 kernel 练习。当前只有 `code/gemm.cu`，其中 naive 和 shared-memory GEMM 都尚未完成，存在缺少输出参数、变量拼写和未完成加载/计算逻辑等问题，不能作为可运行示例。需要完整版本时，应参考 [`cuda-kernel-samples/gemm/`](cuda-kernel-samples/gemm/) 中的六个独立程序。
 
 ## 环境
 
