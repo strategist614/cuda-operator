@@ -1,12 +1,16 @@
 # Triton Kernels
 
-本目录使用 Triton 编写简单的逐元素 GPU kernel，帮助对照 CUDA 中的 grid、block、线程索引和越界判断。
+本目录使用 Triton 编写逐元素和行归约 GPU kernel，帮助对照 CUDA 中的 grid、block、线程索引、越界判断及 block 内 reduction。
 
 | 文件 | 状态 |
 | --- | --- |
 | `add.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
 | `relu.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
 | `sigmoid.py` | 完整实现，包含 PyTorch reference 与正确性检查 |
+| `layernorm.py` | 最后一维 LayerNorm，FP32 统计量、weight/bias 融合与正确性检查 |
+| `rmsnorm.py` | 最后一维 RMSNorm，FP32 统计量、weight 融合与正确性检查 |
+| `softmax.py` | 数值稳定的最后一维 Softmax 与正确性检查 |
+| `normalization_benchmark.py` | 统一比较 LayerNorm、RMSNorm、Softmax 的 Triton 与 PyTorch 性能 |
 | `relu_benchmark.py` | 扫描 ReLU block size，统计寄存器、时间和有效带宽，并导出汇编 |
 | `relu_256.ptx` | `BLOCK_SIZE=256` 时导出的 PTX |
 | `relu_256.sass` | `BLOCK_SIZE=256` 时导出的 SASS |
@@ -92,6 +96,127 @@ y = 1 / (1 + exp(-x))
 python sigmoid.py
 ```
 
+## LayerNorm、RMSNorm 与 Softmax
+
+`layernorm.py`、`rmsnorm.py` 和 `softmax.py` 都把输入的最后一维视为一行，每个 Triton program 处理一行。其他前导维会展平为 `n_rows`，所以二维和更高维连续 tensor 使用相同的 kernel：
+
+```text
+n_cols = x.shape[-1]
+n_rows = x.numel() / n_cols
+grid   = (n_rows,)
+```
+
+`BLOCK_SIZE` 取大于等于 `n_cols` 的最小 2 次幂，超过实际列数的位置通过 mask 保护。因此测试同时覆盖 `hidden=1000` 的非 2 次幂输入和 `hidden=1024` 的对齐输入。
+
+### LayerNorm
+
+LayerNorm 在一个 program 中完成均值、方差、归一化和仿射变换：
+
+```text
+mean     = sum(x) / n_cols
+variance = sum((x - mean)^2) / n_cols
+y        = (x - mean) * rsqrt(variance + epsilon) * weight + bias
+```
+
+### RMSNorm
+
+RMSNorm 不减去均值，也不使用 bias：
+
+```text
+mean_square = sum(x^2) / n_cols
+y           = x * rsqrt(mean_square + epsilon) * weight
+```
+
+### Softmax
+
+Softmax 先减去每行最大值，避免直接计算大指数时溢出：
+
+```text
+shifted = x - max(x)
+y       = exp(shifted) / sum(exp(shifted))
+```
+
+三个 kernel 都把输入转换为 FP32 后完成 reduction，再转换回输入 dtype 写入输出。Python wrapper 支持连续的 FP16、BF16 和 FP32 CUDA tensor；BF16 需要 GPU 架构支持。LayerNorm 和 RMSNorm 要求 weight/bias 与输入位于同一设备、使用相同 dtype，并且长度等于最后一维。
+
+当前实现是 forward-only 学习示例，不带自定义 autograd backward。每个 program 需要把整行放入一个 Triton block tensor，因此当前限制最后一维不超过 65536；非常长的行应使用分段 reduction。
+
+运行 PyTorch reference 测试：
+
+```bash
+python layernorm.py
+python rmsnorm.py
+python softmax.py
+```
+
+### RTX 2080 正确性结果
+
+测试环境为 RTX 2080、PyTorch 2.12.1+cu132、Triton 3.7.1。RTX 2080 不原生支持 BF16，因此本次实测覆盖 FP32 和 FP16：
+
+| Kernel | Shape | Dtype | 最大绝对误差 | 状态 |
+| --- | --- | --- | ---: | --- |
+| `triton_layer_norm` | `(257, 1000)` | FP32 | 0.00000191 | PASS |
+| `triton_layer_norm` | `(4, 8, 1024)` | FP32 | 0.00000143 | PASS |
+| `triton_layer_norm` | `(257, 1000)` | FP16 | 0.00195312 | PASS |
+| `triton_layer_norm` | `(4, 8, 1024)` | FP16 | 0.00195312 | PASS |
+| `triton_rms_norm` | `(257, 1000)` | FP32 | 0.00000191 | PASS |
+| `triton_rms_norm` | `(4, 8, 1024)` | FP32 | 0.00000048 | PASS |
+| `triton_rms_norm` | `(257, 1000)` | FP16 | 0.00195312 | PASS |
+| `triton_rms_norm` | `(4, 8, 1024)` | FP16 | 0.00000000 | PASS |
+| `triton_softmax` | `(257, 1000)` | FP32 | 0.00000012 | PASS |
+| `triton_softmax` | `(4, 8, 1024)` | FP32 | 0.00000003 | PASS |
+| `triton_softmax` | `(257, 1000)` | FP16 | 0.00000763 | PASS |
+| `triton_softmax` | `(4, 8, 1024)` | FP16 | 0.00000000 | PASS |
+
+Softmax 测试还检查了每一行概率和：FP32 最大偏差不超过 `2.4e-7`，FP16 最大偏差不超过 `1.2016e-4`。
+
+### 统一 benchmark
+
+`normalization_benchmark.py` 使用同一组输入依次比较三个 Triton kernel 与 PyTorch 原生实现：
+
+| 算子 | Triton | PyTorch reference |
+| --- | --- | --- |
+| LayerNorm | `triton_layer_norm` | `torch.nn.functional.layer_norm` |
+| RMSNorm | `triton_rms_norm` | `torch.nn.functional.rms_norm` |
+| Softmax | `triton_softmax` | `torch.softmax` |
+
+默认测试 `4096 x 1024`、FP32 和 FP16，每个实现 warm-up 25 次、重复计时 100 次。首次 Triton JIT 不计入时间，每组计时前还会调用 `torch.testing.assert_close` 检查结果：
+
+```bash
+python normalization_benchmark.py
+```
+
+也可以修改 shape、dtype 和计时次数：
+
+```bash
+python normalization_benchmark.py \
+    --rows 8192 \
+    --hidden 2048 \
+    --dtype fp16 \
+    --warmup 25 \
+    --repetitions 200
+```
+
+`--dtype all` 在 Turing GPU 上测试 FP32/FP16，在 Ampere 或更新 GPU 上还会加入 BF16。有效带宽统一按最少一次输入读取和一次输出写入计算：
+
+```text
+effective_gbps = 2 * x.numel() * x.element_size() / (average_ms * 10^6)
+```
+
+它是方便横向比较的算法有效带宽，没有计入 weight/bias 流量、cache 行为或底层实现的额外访存，不等同于 profiler 的 DRAM throughput。
+
+RTX 2080、PyTorch 2.12.1+cu132、Triton 3.7.1 的实测结果：
+
+| 算子 | Dtype | Triton (ms) | PyTorch (ms) | Triton 有效带宽 (GB/s) | PyTorch 有效带宽 (GB/s) | 加速 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| LayerNorm | FP32 | 0.08870311 | 0.10143384 | 378.2780 | 330.8012 | 1.1435x |
+| RMSNorm | FP32 | 0.08793647 | 0.09653577 | 381.5758 | 347.5855 | 1.0978x |
+| Softmax | FP32 | 0.08758260 | 0.09723496 | 383.1176 | 345.0861 | 1.1102x |
+| LayerNorm | FP16 | 0.04681269 | 0.05677113 | 358.3903 | 295.5237 | 1.2127x |
+| RMSNorm | FP16 | 0.04643134 | 0.04802869 | 361.3339 | 349.3165 | 1.0344x |
+| Softmax | FP16 | 0.04624132 | 0.05179807 | 362.8187 | 323.8966 | 1.1202x |
+
+当前 shape 上六组 Triton 实现均快于对应 PyTorch forward。这里的差异只代表指定硬件、版本、shape 和 dtype；修改 hidden size 后，`BLOCK_SIZE`、warp 数、padding 比例和 PyTorch kernel 路径都会变化，应重新 benchmark。
+
 ## Conda 环境
 
 本仓库当前使用 Conda 的 `main` 环境：
@@ -123,9 +248,13 @@ cd triton
 python add.py
 python relu.py
 python sigmoid.py
+python layernorm.py
+python rmsnorm.py
+python softmax.py
+python normalization_benchmark.py
 ```
 
-## 三个示例的共同执行模型
+## 逐元素示例的共同执行模型
 
 三个示例都使用一维 grid，每个 Triton program 处理 `BLOCK_SIZE=256` 个元素：
 
