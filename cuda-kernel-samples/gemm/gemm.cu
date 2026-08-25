@@ -32,6 +32,7 @@ __global__ void gemm_shared_tile(const float* A, const float* B, float* C, int m
         __syncthreads();
 #pragma unroll
         for(int k = 0;k < TILE; ++k) sum += As[ty][k] * Bs[k][tx];
+        __syncthreads();
     }
     if(row < m && col < n) C[row * n + col] = sum;
 }
