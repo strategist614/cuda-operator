@@ -1,6 +1,6 @@
 # CUDA Kernel Samples
 
-本目录包含一组可独立编译、运行的 CUDA kernel 学习示例，覆盖逐元素计算、归约、矩阵乘法和矩阵转置。大多数 `.cu` 文件自带 `main()`、输入构造以及基础的结果输出或正确性验证，适合按单文件阅读和实验。
+本目录包含一组可独立编译、运行的 CUDA kernel 学习示例，覆盖逐元素计算、归约、归一化、矩阵乘法和矩阵转置。大多数 `.cu` 文件自带 `main()`、输入构造以及基础的结果输出或正确性验证，适合按单文件阅读和实验。
 
 ## 目录概览
 
@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [`elementwise/`](elementwise/README.md) | Add、ReLU、Sigmoid 的标量版与 `float4` 向量版 | 线程索引、逐元素计算、向量化访存和尾部处理 |
 | [`reduce/`](reduce/README.md) | Sum、warp shuffle reduction、Softmax | 线程内归约、warp shuffle、跨 warp 合并和数值稳定性 |
+| [`norm/`](norm/README.md) | LayerNorm、RMSNorm 的基础版与优化版 | 行归约、仿射变换、`float4` 访存和两级 warp shuffle reduction |
 | [`gemm/`](gemm/README.md) | Naive、shared-memory tile、warp/register tile、WMMA 及其优化版 | GEMM 分块、数据复用、寄存器累加和 Tensor Core |
 | [`transpose/`](transpose/README.md) | Naive 矩阵转置 | 二维 grid/block、行列索引与非合并写入基线 |
 
@@ -68,8 +69,9 @@ nvcc -O3 -std=c++17 -arch=sm_86 gemm/06_gemm_wmma_cp_async.cu -o gemm/06_gemm_wm
 1. 从 `elementwise/add.cu` 熟悉线程索引和边界判断。
 2. 通过 `float4` 版本观察向量化访存及对齐要求。
 3. 阅读 reduction 示例，理解线程内、warp 内和 block 内的数据合并。
-4. 对比 6 个 GEMM 版本，观察 shared memory、寄存器分块、Tensor Core、warp 内多 tile 复用、向量化加载和 `cp.async` 双缓冲带来的变化。
-5. 最后从 naive transpose 延伸到 shared-memory tiled transpose。
+4. 对比 Norm 的基础版和优化版，观察 shared-memory tree reduction、warp shuffle 与 `float4` 读写的区别。
+5. 对比 6 个 GEMM 版本，观察 shared memory、寄存器分块、Tensor Core、warp 内多 tile 复用、向量化加载和 `cp.async` 双缓冲带来的变化。
+6. 最后从 naive transpose 延伸到 shared-memory tiled transpose。
 
 这些代码以学习和实验为目的，不是生产级算子库。修改输入尺寸、block 配置或 tile 参数后，应重新检查边界条件、数值误差、shared-memory/寄存器占用以及 kernel launch 错误。各示例的具体限制见对应子目录 README。
 
