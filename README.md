@@ -12,7 +12,7 @@
 | [`cuda-kernel-samples/`](cuda-kernel-samples/) | Elementwise、Reduction、Transpose、GEMM 小型示例 | 单文件 kernel 练习 |
 | [`cuda-operator-pytorch/`](cuda-operator-pytorch/) | JIT Extension 与可安装的 dispatcher/custom op 示例 | PyTorch C++/CUDA 算子接入 |
 | [`operator/`](operator/) | Attention、GEMM、LayerNorm、RMSNorm、Softmax、HWC→CHW normalize | 算子逐版本优化 |
-| [`triton/`](triton/) | Add、ReLU、Sigmoid、LayerNorm、RMSNorm、Softmax、benchmark 与汇编导出 | Triton 逐元素 kernel、行归约与编译结果观察 |
+| [`triton/`](triton/) | Elementwise、Norm、Softmax、普通/高优化 GEMM、benchmark 与汇编导出 | Triton 逐元素 kernel、行归约、Tensor Core 与编译结果观察 |
 | [`mini-triton/`](mini-triton/) | Python AST、IR、PTX、Tensor/Layout/Thread/Address/Register lowering | 教学型 GPU DSL 编译器 |
 | [`cutlass/`](cutlass/) | CUTLASS 学习规划 | 当前为空源码占位 |
 | [`job-interview/`](job-interview/) | 面试相关 CUDA kernel 草稿 | 当前为未完成的 GEMM 练习 |
@@ -75,6 +75,9 @@
 - `add.py`、`relu.py`、`sigmoid.py`：逐元素 Triton kernel 与 PyTorch reference。
 - `layernorm.py`、`rmsnorm.py`、`softmax.py`：最后一维 fused reduction kernel 与 PyTorch reference。
 - `normalization_benchmark.py`：统一比较三个 Triton kernel 与 PyTorch 原生实现。
+- `gemm.py`：固定 tile 和单 stage 的普通 Triton GEMM。
+- `gemm_optimized.py`：面向 `sm_80+` 的 Tensor Core、grouped ordering、autotune 和流水双缓冲 GEMM。
+- `gemm_sm86_compile_check.py`、`gemm_benchmark.py`：验证 `mma.sync`/`cp.async` 并测试 GEMM 性能。
 - `relu_benchmark.py`：扫描 BLOCK_SIZE，统计寄存器、耗时和有效带宽。
 - `relu_256.ptx`、`relu_256.sass`：ReLU 的编译产物，用于观察 global-memory 指令。
 - `max.py`：当前为空文件，是后续练习占位。
@@ -179,6 +182,10 @@ conda run -n main python triton/layernorm.py
 conda run -n main python triton/rmsnorm.py
 conda run -n main python triton/softmax.py
 conda run -n main python triton/normalization_benchmark.py
+conda run -n main python triton/gemm.py
+conda run -n main python triton/gemm_optimized.py
+conda run -n main python triton/gemm_sm86_compile_check.py
+conda run -n main python triton/gemm_benchmark.py
 ```
 
 `torch.cuda.is_available()` 应为 `True`。

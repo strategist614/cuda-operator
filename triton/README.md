@@ -11,6 +11,10 @@
 | `rmsnorm.py` | 最后一维 RMSNorm，FP32 统计量、weight 融合与正确性检查 |
 | `softmax.py` | 数值稳定的最后一维 Softmax 与正确性检查 |
 | `normalization_benchmark.py` | 统一比较 LayerNorm、RMSNorm、Softmax 的 Triton 与 PyTorch 性能 |
+| `gemm.py` | 固定 tile、单 stage 的普通 Triton GEMM 基线 |
+| `gemm_optimized.py` | Tensor Core、grouped ordering、autotune 和多 stage 流水 GEMM |
+| `gemm_sm86_compile_check.py` | 离线编译 `sm_86` 并检查 `mma.sync`、`cp.async` 和双缓冲 |
+| `gemm_benchmark.py` | 比较普通版、高优化版和 PyTorch GEMM |
 | `relu_benchmark.py` | 扫描 ReLU block size，统计寄存器、时间和有效带宽，并导出汇编 |
 | `relu_256.ptx` | `BLOCK_SIZE=256` 时导出的 PTX |
 | `relu_256.sass` | `BLOCK_SIZE=256` 时导出的 SASS |
@@ -217,6 +221,174 @@ RTX 2080、PyTorch 2.12.1+cu132、Triton 3.7.1 的实测结果：
 
 当前 shape 上六组 Triton 实现均快于对应 PyTorch forward。这里的差异只代表指定硬件、版本、shape 和 dtype；修改 hidden size 后，`BLOCK_SIZE`、warp 数、padding 比例和 PyTorch kernel 路径都会变化，应重新 benchmark。
 
+## GEMM
+
+本目录提供普通版和面向 Ampere 的高优化版，均计算连续行主序矩阵：
+
+```text
+A: [M, K]
+B: [K, N]
+C: [M, N]
+C = A @ B
+```
+
+两个 kernel 都使用 FP32 accumulator，并在写回时转换为输出 tensor 的 dtype。M/N/K 不要求是 tile 的整数倍。
+
+### 普通版 `gemm.py`
+
+普通版使用固定的 `32 x 32 x 32` tile 和二维 program grid：
+
+```text
+grid = (ceil(M / 32), ceil(N / 32))
+num_warps  = 4
+num_stages = 1
+```
+
+每个 program 沿 K 维逐块加载 A/B，通过 `tl.dot` 累加，再用 M/N mask 写回。它没有 grouped program ordering、autotune 或多 stage pipeline，支持 FP16 和 FP32，主要作为结构清晰的性能基线。
+
+### 高优化版 `gemm_optimized.py`
+
+高优化版要求 compute capability 8.0 或更高，面向 RTX 3090 的 `sm_86` 路径包含：
+
+- FP16/BF16 输入、FP32 accumulator 的 `tl.dot` Tensor Core 计算。
+- 一维 grid 与 `GROUP_SIZE_M=8` 的 grouped tile ordering，连续处理一组 M tiles，提高 B tile 的 L2 cache 复用机会。
+- `64/128` 的 M/N tile 和 `BLOCK_K=32` 的多组候选配置。
+- `num_warps=4/8`、`num_stages=2/3` autotune，根据 M/N/K 选择实测最快配置。
+- K-loop 使用 `tl.range(..., num_stages=PIPELINE_STAGES)`，让后续 A/B tile 的 global-to-shared copy 与当前 tile 的 MMA 重叠。
+- 边界 M/N 使用取模加载，避免复杂边界 mask 阻断 dot operand pipeline；最终 C 写回仍使用真实边界 mask。
+
+候选配置中的 `PIPELINE_STAGES` 均不小于 2，因此不会退化为单 stage 版本。`64 x 64 x 32`、3-stage 配置在 `sm_86` 编译结果中实际分配 16 KiB shared memory：单套 A/B tile 为 8 KiB，对应两套 shared buffer。
+
+#### Triton 中的 WMMA
+
+Triton 不直接暴露 CUDA C++ 的 `nvcuda::wmma::fragment` API。Triton 源码使用 `tl.dot` 表达矩阵乘加，NVIDIA backend 再把它降低为 PTX `mma.sync` 和最终的 Tensor Core 机器指令。因此这里所说的 WMMA/Tensor Core 路径是 `tl.dot -> mma.sync`，不是在 Python 中直接调用 WMMA 类型。
+
+当前 Triton 3.7.1 backend 在 `sm_75` 上会把本 kernel 的 `tl.dot` 降低为 SIMT `fma.rn.f32`，并且不启用 Ampere loop pipeline。因此高优化 wrapper 明确拒绝 `sm_75`，避免把 RTX 2080 fallback 错称为 Tensor Core + double buffering；应在 RTX 3090 或更新 GPU 上运行。
+
+### `sm_86` 离线编译检查
+
+即使当前机器不是 Ampere，也可以通过 Triton 的离线编译接口生成 `sm_86` PTX，并检查 Tensor Core 和双缓冲证据：
+
+```bash
+python gemm_sm86_compile_check.py
+```
+
+本次 CUDA 13.2、Triton 3.7.1 静态编译结果：
+
+| 指标 | 结果 |
+| --- | ---: |
+| Target | `sm86` |
+| Warps | 4 |
+| Pipeline stages | 3 |
+| Static shared memory | 16,384 bytes |
+| `mma.sync` 数量 | 16 |
+| `cp.async` 数量 | 20 |
+| `cp.async.commit_group` | 存在 |
+| `cp.async.wait_group` | 存在 |
+| Tensor Core 检查 | PASS |
+| Double buffering 检查 | PASS |
+
+其中 PTX 的核心指令包括：
+
+```text
+cp.async.cg.shared.global
+cp.async.commit_group
+cp.async.wait_group
+mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+```
+
+`gemm_sm86_compile_check.py` 使用 Triton 的编译器内部接口，适用于仓库记录的 Triton 3.7.1；升级 Triton 后如果内部 API 变化，需要同步调整脚本。
+
+### 正确性测试
+
+普通版已在 RTX 2080 上实测：
+
+| Shape (M x N x K) | Dtype | 最大绝对误差 | 状态 |
+| --- | --- | ---: | --- |
+| `257 x 259 x 384` | FP32 | 0.00000334 | PASS |
+| `257 x 259 x 384` | FP16 | 0.00195312 | PASS |
+| `512 x 512 x 512` | FP16 | 0.00195312 | PASS |
+
+优化版修改后的 M/N 取模边界路径也通过了 `257 x 259 x 384` 数学结果检查，最大绝对误差为 `0.00390625`。该检查在 RTX 2080 上只验证计算和边界逻辑；Tensor Core 与 `cp.async` 由上述 `sm_86` 离线编译确认，最终 runtime 正确性与性能仍需在 RTX 3090 上复测。
+
+运行：
+
+```bash
+python gemm.py
+python gemm_optimized.py
+```
+
+在 `sm_75` 上，`gemm_optimized.py` 会输出 `runtime_status=SKIP`；在 `sm_80+` 上会执行 FP16 correctness test、autotune 并打印最优配置。
+
+### GEMM benchmark
+
+```bash
+python gemm_benchmark.py
+```
+
+可以自定义矩阵尺寸和计时次数：
+
+```bash
+python gemm_benchmark.py \
+    --m 4096 \
+    --n 4096 \
+    --k 4096 \
+    --warmup 25 \
+    --repetitions 100
+```
+
+脚本使用 FP16 输入，先和 `torch.matmul` 做正确性检查，再用 `triton.testing.do_bench` 测量时间并按 `2MNK` 计算 GFLOPS。在 RTX 2080 上只运行普通版和 PyTorch，并明确跳过需要 `sm_80+` 的优化版；RTX 3090 上会自动加入高优化版、最优 autotune 配置以及相对普通版/PyTorch 的加速比。
+
+benchmark 的默认矩阵尺寸为 `4096 x 4096 x 4096`。如果需要复现之前的小矩阵测试，可以显式传入：
+
+```bash
+python gemm_benchmark.py --m 512 --n 512 --k 512
+```
+
+用户在 RTX 4090 上提供的 `512 x 512 x 512` 实测结果：
+
+| Provider | 平均时间 (ms) | GFLOPS | 状态 |
+| --- | ---: | ---: | --- |
+| 普通 Triton GEMM | 0.01471351 | 18244.1484 | PASS |
+| 高优化 Triton GEMM | 0.01283110 | 20920.6914 | PASS |
+| PyTorch `matmul` | 0.01186698 | 22620.3670 | PASS |
+
+高优化版相比普通版吞吐提高 `1.1467x`，达到 PyTorch 吞吐的 `92.49%`。autotune 选择：
+
+```text
+BLOCK_M=64, BLOCK_N=64, BLOCK_K=32
+GROUP_SIZE_M=8, PIPELINE_STAGES=3
+num_warps=4, num_stages=3
+```
+
+同一台 RTX 4090 上 `4096 x 4096 x 4096` 的实测结果：
+
+| Provider | 平均时间 (ms) | GFLOPS | 状态 |
+| --- | ---: | ---: | --- |
+| 普通 Triton GEMM | 1.68614340 | 81510.8334 | PASS |
+| 高优化 Triton GEMM | 0.82648356 | 166293.6328 | PASS |
+| PyTorch `matmul` | 0.81394030 | 168856.3069 | PASS |
+
+高优化版相比普通版达到 `2.0401x` 加速，执行时间减少约 `50.98%`；吞吐达到 PyTorch 的 `98.48%`，PyTorch 只领先约 `1.54%`。本次 autotune 选择：
+
+```text
+BLOCK_M=64, BLOCK_N=128, BLOCK_K=32
+GROUP_SIZE_M=8, PIPELINE_STAGES=2
+num_warps=4, num_stages=2
+```
+
+相比 `512³` 选择的 `64 x 64`、3-stage 配置，`4096³` 改用更宽的 `64 x 128` 输出 tile 和 2-stage pipeline。大矩阵提供了足够多的 program 填满 GPU，更大的 N tile 可以增加每个 program 的计算量并减少调度开销；最终选择仍以 autotune 在当前 shape 上的实测为准。
+
+当前 RTX 2080、`4096 x 4096 x 4096` 的实测结果：
+
+| Provider | 平均时间 (ms) | GFLOPS | 状态 |
+| --- | ---: | ---: | --- |
+| 普通 Triton GEMM | 45.40204811 | 3027.1532 | PASS |
+| 高优化 Triton GEMM | - | - | SKIP（需要 `sm_80+`） |
+| PyTorch `matmul` | 4.19220004 | 32784.4454 | PASS |
+
+普通版只有 PyTorch 性能的约 `9.23%`，符合它在 `sm_75` 上回退为 SIMT FMA 的未优化教学基线定位。RTX 2080 和 RTX 4090 的结果只用于展示架构差异，不能跨 GPU 直接判断实现加速；同一实现之间的公平比较应使用上面的 RTX 4090 同尺寸三方数据。
+
 ## Conda 环境
 
 本仓库当前使用 Conda 的 `main` 环境：
@@ -252,6 +424,10 @@ python layernorm.py
 python rmsnorm.py
 python softmax.py
 python normalization_benchmark.py
+python gemm.py
+python gemm_optimized.py
+python gemm_sm86_compile_check.py
+python gemm_benchmark.py
 ```
 
 ## 逐元素示例的共同执行模型
