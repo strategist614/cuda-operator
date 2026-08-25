@@ -1,6 +1,6 @@
 # CUDA Operator Practice
 
-这是一个 CUDA、Triton 和 GPU 编译器学习仓库。内容从 CUDA 线程模型、访存、归约与矩阵转置开始，逐步扩展到 GEMM、归一化、Softmax、Attention、Triton kernel，以及一个用 Python 实现的教学型 Mini Triton 编译器。
+这是一个 CUDA、PyTorch Custom Operator、Triton 和 GPU 编译器学习仓库。内容从 CUDA 线程索引、访存、归约与矩阵转置开始，逐步扩展到 GEMM、归一化、Softmax、Attention、PyTorch C++/CUDA Extension、Triton kernel，以及一个用 Python 实现的教学型 Mini Triton 编译器。
 
 仓库以学习记录和优化实验为主，不是统一构建、完整测试或生产部署的算子库。不同目录的完成度不同：既有能运行并验证结果的示例，也有编译器阶段实验、固定 shape 优化和仍不能编译的 kernel 草稿。
 
@@ -8,13 +8,14 @@
 
 | 目录 | 主要内容 | 当前定位 |
 | --- | --- | --- |
-| [`low-level/`](low-level/) | block、warp、SM、occupancy、访存等底层概念 | 基础笔记 |
 | [`cuda-kernel-practice-core/`](cuda-kernel-practice-core/) | VectorAdd、MatrixMul、Reduction、Transpose，以及 scan/卷积/异步拷贝占位练习 | CUDA 基础与经典优化 |
 | [`cuda-kernel-samples/`](cuda-kernel-samples/) | Elementwise、Reduction、Transpose、GEMM 小型示例 | 单文件 kernel 练习 |
+| [`cuda-operator-pytorch/`](cuda-operator-pytorch/) | JIT Extension 与可安装的 dispatcher/custom op 示例 | PyTorch C++/CUDA 算子接入 |
 | [`operator/`](operator/) | Attention、GEMM、LayerNorm、RMSNorm、Softmax、HWC→CHW normalize | 算子逐版本优化 |
 | [`triton/`](triton/) | Add、ReLU、Sigmoid、ReLU benchmark、PTX/SASS 导出 | Triton kernel 与编译结果观察 |
 | [`mini-triton/`](mini-triton/) | Python AST、IR、PTX、Tensor/Layout/Thread/Address/Register lowering | 教学型 GPU DSL 编译器 |
 | [`cutlass/`](cutlass/) | CUTLASS 学习规划 | 当前为空源码占位 |
+| [`job-interview/`](job-interview/) | 面试相关 CUDA kernel 草稿 | 当前为未完成的 GEMM 练习 |
 
 根目录的 [`CUDA_C_Best_Practices_Guide.pdf`](CUDA_C_Best_Practices_Guide.pdf) 是 CUDA 性能优化参考资料。
 
@@ -37,9 +38,20 @@
 - Elementwise：Add、ReLU、Sigmoid 及 `float4` 版本。
 - Reduce：sum、warp shuffle、Softmax。
 - Transpose：naive 二维矩阵转置。
-- GEMM：naive、shared tile、warp/register tile 和 WMMA 草稿。
+- GEMM：naive、shared-memory tile、warp/register tile 和 WMMA 四个独立版本。
 
-GEMM 目录中的 `gemm.cu` 当前仍存在编译错误，详细状态和修复顺序见 [`cuda-kernel-samples/gemm/README.md`](cuda-kernel-samples/gemm/README.md)。目录中的旧可执行文件不保证与当前源码一致。
+GEMM 的 4 个独立程序均包含 host 端输入、CPU reference、误差检查和 CUDA Event benchmark，并已在 `512 x 512 x 512` 矩阵上通过验证。汇总文件 `gemm.cu` 只包含 device kernel，仍保留列索引和同步问题，不能独立编译运行；实现说明、完整汇总代码和实测结果见 [`cuda-kernel-samples/gemm/README.md`](cuda-kernel-samples/gemm/README.md)。
+
+### PyTorch Custom Operator
+
+[`cuda-operator-pytorch/`](cuda-operator-pytorch/) 目前包含两种从 Python 调用 CUDA kernel 的方式：
+
+| 目录 | 构建/注册方式 | 主要内容 |
+| --- | --- | --- |
+| [`simple/`](cuda-operator-pytorch/simple/) | `torch.utils.cpp_extension.load` JIT 编译与 pybind11 导出 | FP32 CUDA Add、输入检查、当前 device/stream 接入 |
+| [`add/`](cuda-operator-pytorch/add/) | `setup.py` + `CUDAExtension` + `TORCH_LIBRARY` dispatcher | CPU/CUDA dispatch、FP16/FP32/FP64 CUDA kernel、FakeTensor、autograd、`opcheck`、`torch.compile` |
+
+`simple/` 适合先理解 Python→C++ binding→CUDA kernel 的最短调用链；`add/` 展示更接近正式 PyTorch custom op 的包结构和注册方式。详细构建、接口约束和测试方法分别见两个目录的 README。
 
 ### 算子优化
 
@@ -90,6 +102,10 @@ Layout → Thread → Address → Register lowering → PTX simulation
 
 不同小版本不是严格的功能超集，部分阶段会被单独抽出来实验。请从 [`mini-triton/README.md`](mini-triton/README.md) 开始，并以各版本 README 的“当前限制”为准。
 
+### 面试练习草稿
+
+[`job-interview/`](job-interview/) 用于保存面试相关的手写 kernel 练习。当前只有 `code/gemm.cu`，其中 naive 和 shared-memory GEMM 都尚未完成，存在缺少输出参数、变量拼写和未完成加载/计算逻辑等问题，不能作为可运行示例。需要稳定版本时，应参考 [`cuda-kernel-samples/gemm/`](cuda-kernel-samples/gemm/) 中的四个独立程序。
+
 ## 环境
 
 ### CUDA 示例
@@ -115,6 +131,32 @@ nvcc -O3 -std=c++17 path/to/example.cu -o /tmp/example
 ```
 
 并非所有 `.cu` 文件当前都可编译；先阅读所在目录 README。
+
+### PyTorch Extension 环境
+
+[`cuda-operator-pytorch/`](cuda-operator-pytorch/) 额外需要 CUDA-enabled PyTorch、PyTorch 支持的 C++ 编译器和 Ninja。检查环境：
+
+```bash
+python3 -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.is_available())"
+nvcc --version
+ninja --version
+```
+
+运行简单 JIT 示例：
+
+```bash
+python3 cuda-operator-pytorch/simple/test.py
+```
+
+构建并测试 dispatcher/custom op 示例：
+
+```bash
+cd cuda-operator-pytorch/add
+python3 setup.py build_ext --inplace
+python3 -m pytest tests -v
+```
+
+完整测试需要可用的 NVIDIA GPU。PyTorch、CUDA Toolkit、Python 或平台变化后，应重新构建 `_C` Extension，不要复用其他环境生成的 `.so`。
 
 ### Triton 环境
 
@@ -196,21 +238,23 @@ CUDA kernel 可用 CUDA Event 测量，Triton 可用 `triton.testing.do_bench`�
 
 ## 推荐学习路线
 
-1. [`low-level/`](low-level/)：理解 block、warp、SM 和访存。
-2. [`cuda-kernel-practice-core/vectorAdd/`](cuda-kernel-practice-core/vectorAdd/)：掌握完整 CUDA 程序流程。
-3. [`cuda-kernel-samples/elementwise/`](cuda-kernel-samples/elementwise/)：标量与 `float4` elementwise。
-4. [`cuda-kernel-samples/reduce/`](cuda-kernel-samples/reduce/) 和 [`cuda-kernel-practice-core/reduction/`](cuda-kernel-practice-core/reduction/)：shared memory 与 warp shuffle。
-5. [`cuda-kernel-practice-core/transpose/`](cuda-kernel-practice-core/transpose/)：coalescing 和 bank conflict。
-6. [`operator/LayerNorm/`](operator/LayerNorm/)、[`operator/RMSNorm/`](operator/RMSNorm/)、[`operator/SoftMax/`](operator/SoftMax/)：归约型真实算子。
-7. [`operator/GEMM/`](operator/GEMM/)：shared/register/warp tiling。
-8. [`operator/Attention/`](operator/Attention/)：online softmax 与融合。
-9. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
-10. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
+1. [`cuda-kernel-practice-core/vectorAdd/`](cuda-kernel-practice-core/vectorAdd/)：掌握线程索引、内存管理和完整 CUDA 程序流程。
+2. [`cuda-kernel-samples/elementwise/`](cuda-kernel-samples/elementwise/)：对比标量与 `float4` elementwise。
+3. [`cuda-kernel-samples/reduce/`](cuda-kernel-samples/reduce/) 和 [`cuda-kernel-practice-core/reduction/`](cuda-kernel-practice-core/reduction/)：学习 shared memory 与 warp shuffle。
+4. [`cuda-kernel-practice-core/transpose/`](cuda-kernel-practice-core/transpose/)：理解 coalescing 和 bank conflict。
+5. [`cuda-kernel-samples/gemm/`](cuda-kernel-samples/gemm/)：从 naive 逐步学习 shared/register tiling 和 WMMA。
+6. [`operator/LayerNorm/`](operator/LayerNorm/)、[`operator/RMSNorm/`](operator/RMSNorm/)、[`operator/SoftMax/`](operator/SoftMax/)：进入归约型真实算子。
+7. [`operator/GEMM/`](operator/GEMM/) 与 [`operator/Attention/`](operator/Attention/)：研究更深入的分块、online softmax 和融合。
+8. [`cuda-operator-pytorch/simple/`](cuda-operator-pytorch/simple/)：理解 Python、C++ binding 和 CUDA kernel 的调用链。
+9. [`cuda-operator-pytorch/add/`](cuda-operator-pytorch/add/)：学习 dispatcher、autograd、FakeTensor 与 `torch.compile` 接入。
+10. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
+11. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
 
 ## 仓库状态与注意事项
 
-- 仓库没有统一 CMake/Makefile；多数示例独立编译运行。
+- 仓库没有统一构建入口；CUDA 示例多为单文件 `nvcc` 编译，PyTorch Extension、Triton 和 Mini Triton 使用各自的 Python 入口。
 - 无扩展名文件多为本地编译产物，不应视为可复现构建结果。
+- `cuda-operator-pytorch/add/cuda_operator/_C*.so` 是与 Python、PyTorch、CUDA 和平台绑定的本地构建产物，已通过 `.gitignore` 排除。
 - `output/*.mir`、`*.tir`、`*.ptx` 可能是教学快照或占位 backend 输出，不一定能执行。
 - `__pycache__/*.pyc` 是 Python 运行缓存。
 - 部分源码仍有语法错误、固定尺寸假设、缺少边界处理或资源释放。
