@@ -337,31 +337,9 @@ python gemm_benchmark.py \
     --repetitions 100
 ```
 
-脚本使用 FP16 输入，先和 `torch.matmul` 做正确性检查，再用 `triton.testing.do_bench` 测量时间并按 `2MNK` 计算 GFLOPS。在 RTX 2080 上只运行普通版和 PyTorch，并明确跳过需要 `sm_80+` 的优化版；RTX 3090 上会自动加入高优化版、最优 autotune 配置以及相对普通版/PyTorch 的加速比。
+脚本使用 FP16 输入，先和 `torch.matmul` 做正确性检查，再用 `triton.testing.do_bench` 测量时间并按 `2MNK` 计算 GFLOPS。benchmark 的默认矩阵尺寸为 `4096 x 4096 x 4096`；在 `sm_80+` GPU 上会输出普通版、高优化版、PyTorch、最优 autotune 配置以及相对加速比。
 
-benchmark 的默认矩阵尺寸为 `4096 x 4096 x 4096`。如果需要复现之前的小矩阵测试，可以显式传入：
-
-```bash
-python gemm_benchmark.py --m 512 --n 512 --k 512
-```
-
-用户在 RTX 4090 上提供的 `512 x 512 x 512` 实测结果：
-
-| Provider | 平均时间 (ms) | GFLOPS | 状态 |
-| --- | ---: | ---: | --- |
-| 普通 Triton GEMM | 0.01471351 | 18244.1484 | PASS |
-| 高优化 Triton GEMM | 0.01283110 | 20920.6914 | PASS |
-| PyTorch `matmul` | 0.01186698 | 22620.3670 | PASS |
-
-高优化版相比普通版吞吐提高 `1.1467x`，达到 PyTorch 吞吐的 `92.49%`。autotune 选择：
-
-```text
-BLOCK_M=64, BLOCK_N=64, BLOCK_K=32
-GROUP_SIZE_M=8, PIPELINE_STAGES=3
-num_warps=4, num_stages=3
-```
-
-同一台 RTX 4090 上 `4096 x 4096 x 4096` 的实测结果：
+RTX 4090 上 `4096 x 4096 x 4096` 的实测结果：
 
 | Provider | 平均时间 (ms) | GFLOPS | 状态 |
 | --- | ---: | ---: | --- |
@@ -377,17 +355,7 @@ GROUP_SIZE_M=8, PIPELINE_STAGES=2
 num_warps=4, num_stages=2
 ```
 
-相比 `512³` 选择的 `64 x 64`、3-stage 配置，`4096³` 改用更宽的 `64 x 128` 输出 tile 和 2-stage pipeline。大矩阵提供了足够多的 program 填满 GPU，更大的 N tile 可以增加每个 program 的计算量并减少调度开销；最终选择仍以 autotune 在当前 shape 上的实测为准。
-
-当前 RTX 2080、`4096 x 4096 x 4096` 的实测结果：
-
-| Provider | 平均时间 (ms) | GFLOPS | 状态 |
-| --- | ---: | ---: | --- |
-| 普通 Triton GEMM | 45.40204811 | 3027.1532 | PASS |
-| 高优化 Triton GEMM | - | - | SKIP（需要 `sm_80+`） |
-| PyTorch `matmul` | 4.19220004 | 32784.4454 | PASS |
-
-普通版只有 PyTorch 性能的约 `9.23%`，符合它在 `sm_75` 上回退为 SIMT FMA 的未优化教学基线定位。RTX 2080 和 RTX 4090 的结果只用于展示架构差异，不能跨 GPU 直接判断实现加速；同一实现之间的公平比较应使用上面的 RTX 4090 同尺寸三方数据。
+本次 autotune 选择了较宽的 `64 x 128` 输出 tile 和 2-stage pipeline。`4096³` 提供了足够多的 program 填满 GPU，更大的 N tile 可以增加每个 program 的计算量并减少调度开销；最终配置仍以 autotune 在当前 shape 上的实测为准。
 
 ## Conda 环境
 
