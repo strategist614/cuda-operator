@@ -1,0 +1,5 @@
+==PROF== Connected to process 485687 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "register_limited_kernel" - 0: 0%....50%....100% - 33 passes
+case=register_limited average_ms=5409.5215 launches=1 warmup=no
+==PROF== Disconnected from process 485687
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/register_limited.ncu-rep

@@ -1,0 +1,5 @@
+==PROF== Connected to process 485462 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "instruction_kernel" - 0: 0%....50%....100% - 33 passes
+case=instructions average_ms=5458.6191 launches=1 warmup=no
+==PROF== Disconnected from process 485462
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/instructions.ncu-rep

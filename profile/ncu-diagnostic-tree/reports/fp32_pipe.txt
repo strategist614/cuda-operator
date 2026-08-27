@@ -1,0 +1,5 @@
+==PROF== Connected to process 485383 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "fp32_pipe_kernel(float *, int)" - 0: 0%....50%....100% - 33 passes
+case=fp32_pipe average_ms=5104.4722 launches=1 warmup=no
+==PROF== Disconnected from process 485383
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/fp32_pipe.ncu-rep

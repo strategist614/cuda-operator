@@ -1,0 +1,5 @@
+==PROF== Connected to process 485986 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "barrier_kernel(float *, int)" - 0: 0%....50%....100% - 33 passes
+case=barrier average_ms=4962.5264 launches=1 warmup=no
+==PROF== Disconnected from process 485986
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/barrier.ncu-rep

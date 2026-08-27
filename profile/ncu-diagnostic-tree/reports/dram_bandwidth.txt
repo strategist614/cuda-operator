@@ -1,0 +1,5 @@
+==PROF== Connected to process 485536 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "dram_bandwidth_kernel" - 0: 0%....50%....100% - 33 passes
+case=dram_bandwidth average_ms=4985.6797 launches=1 warmup=no
+==PROF== Disconnected from process 485536
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/dram_bandwidth.ncu-rep

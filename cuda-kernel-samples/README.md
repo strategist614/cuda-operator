@@ -1,6 +1,6 @@
 # CUDA Kernel Samples
 
-本目录包含一组可独立编译、运行的 CUDA kernel 学习示例，覆盖逐元素计算、归约、归一化、矩阵乘法和矩阵转置。大多数 `.cu` 文件自带 `main()`、输入构造以及基础的结果输出或正确性验证，适合按单文件阅读和实验。
+本目录包含一组可独立编译、运行的 CUDA kernel 学习示例，覆盖逐元素计算、归约、归一化、矩阵乘法、Attention 和矩阵转置。大多数 `.cu` 文件自带 `main()`、输入构造以及基础的结果输出或正确性验证；Attention 示例通过 PyTorch CUDA extension 运行，适合按目录阅读和实验。
 
 ## 目录概览
 
@@ -10,6 +10,7 @@
 | [`reduce/`](reduce/README.md) | Sum、warp shuffle reduction、Softmax | 线程内归约、warp shuffle、跨 warp 合并和数值稳定性 |
 | [`norm/`](norm/README.md) | LayerNorm、RMSNorm 的基础版与优化版 | 行归约、仿射变换、`float4` 访存和两级 warp shuffle reduction |
 | [`gemm/`](gemm/README.md) | Naive、shared-memory tile、warp/register tile、WMMA 及其优化版 | GEMM 分块、数据复用、寄存器累加和 Tensor Core |
+| [`attention/`](attention/README.md) | 基础 scaled dot-product attention、WMMA 在线 softmax 融合版、PyTorch SDPA benchmark | Attention 分阶段计算、Tensor Core、稳定在线 softmax、kernel 融合和二次方中间矩阵消除 |
 | [`transpose/`](transpose/README.md) | Naive 矩阵转置 | 二维 grid/block、行列索引与非合并写入基线 |
 
 GEMM 示例当前包含 6 个完整程序，优化路线为：
@@ -30,6 +31,7 @@ Naive FP32
 - 支持 CUDA 的 NVIDIA GPU。
 - CUDA Toolkit，以及可直接调用的 `nvcc`。
 - WMMA 示例需要支持 Tensor Core 的 GPU，并使用与实际 GPU compute capability 对应的 `-arch=sm_XX`；06 使用 `cp.async`，要求 `sm_80+`。
+- Attention 示例还需要安装 CUDA 版 PyTorch 的 Python 环境，用于编译 C++/CUDA extension、正确性校验和 benchmark；自定义算子本身均由 CUDA C++ 实现，不依赖 Triton。其 WMMA 路径要求 compute capability 7.0+。
 
 01–05 的示例编译目标是 `sm_75`，06 面向 RTX 3090 使用 `sm_86`。其他 GPU 应调整该参数，例如使用 `nvidia-smi` 确认 GPU 型号后查询对应的 compute capability；06 不能降低到 `sm_75`，因为它依赖 `cp.async`。
 
@@ -71,7 +73,8 @@ nvcc -O3 -std=c++17 -arch=sm_86 gemm/06_gemm_wmma_cp_async.cu -o gemm/06_gemm_wm
 3. 阅读 reduction 示例，理解线程内、warp 内和 block 内的数据合并。
 4. 对比 Norm 的基础版和优化版，观察 shared-memory tree reduction、warp shuffle 与 `float4` 读写的区别。
 5. 对比 6 个 GEMM 版本，观察 shared memory、寄存器分块、Tensor Core、warp 内多 tile 复用、向量化加载和 `cp.async` 双缓冲带来的变化。
-6. 最后从 naive transpose 延伸到 shared-memory tiled transpose。
+6. 阅读 Attention 的分阶段基线，再对照 WMMA 在线 softmax 融合版，理解 Tensor Core 分块以及如何避免物化 `S x S` score 矩阵。
+7. 最后从 naive transpose 延伸到 shared-memory tiled transpose。
 
 这些代码以学习和实验为目的，不是生产级算子库。修改输入尺寸、block 配置或 tile 参数后，应重新检查边界条件、数值误差、shared-memory/寄存器占用以及 kernel launch 错误。各示例的具体限制见对应子目录 README。
 

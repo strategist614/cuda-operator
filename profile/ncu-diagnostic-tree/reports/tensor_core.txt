@@ -1,0 +1,5 @@
+==PROF== Connected to process 485301 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "tensor_core_kernel" - 0: 0%....50%....100% - 33 passes
+case=tensor_core average_ms=5014.6826 launches=1 warmup=no
+==PROF== Disconnected from process 485301
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/tensor_core.ncu-rep

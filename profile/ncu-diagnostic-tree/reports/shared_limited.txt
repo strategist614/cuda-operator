@@ -1,0 +1,5 @@
+==PROF== Connected to process 485761 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "shared_limited_kernel" - 0: 0%....50%....100% - 33 passes
+case=shared_limited average_ms=5559.2910 launches=1 warmup=no
+==PROF== Disconnected from process 485761
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/shared_limited.ncu-rep

@@ -1,0 +1,5 @@
+==PROF== Connected to process 485613 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "l2_bandwidth_kernel" - 0: 0%....50%....100% - 33 passes
+case=l2_bandwidth average_ms=5018.5708 launches=1 warmup=no
+==PROF== Disconnected from process 485613
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/l2_bandwidth.ncu-rep

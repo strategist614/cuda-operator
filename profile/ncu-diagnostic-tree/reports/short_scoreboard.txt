@@ -1,0 +1,5 @@
+==PROF== Connected to process 485911 (/data/cuda-operator/profile/ncu-diagnostic-tree/ncu_diagnostic_tree)
+==PROF== Profiling "short_scoreboard_kernel" - 0: 0%....50%....100% - 33 passes
+case=short_scoreboard average_ms=5850.0190 launches=1 warmup=no
+==PROF== Disconnected from process 485911
+==PROF== Report: /data/cuda-operator/profile/ncu-diagnostic-tree/reports/short_scoreboard.ncu-rep
