@@ -1,0 +1,4 @@
+gpu,cc_major,cc_minor,dtype,batch,n,k,kernel,latency_ms,gelem_per_s
+NVIDIA GeForce RTX 2080,7,5,fp32,128,65536,1,warpselect_k1_v4,0.311781764,26.9053837
+NVIDIA GeForce RTX 2080,7,5,fp32,128,65536,4,warpselect_k4_v4,0.418328315,20.05269
+NVIDIA GeForce RTX 2080,7,5,fp32,128,65536,8,batch_v3,0.475974381,17.6240746
