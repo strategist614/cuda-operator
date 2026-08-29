@@ -12,6 +12,7 @@
 | [`cuda-kernel-samples/`](cuda-kernel-samples/) | Elementwise、Reduction、Transpose、GEMM 小型示例 | 单文件 kernel 练习 |
 | [`cuda-operator-pytorch/`](cuda-operator-pytorch/) | JIT Extension 与可安装的 dispatcher/custom op 示例 | PyTorch C++/CUDA 算子接入 |
 | [`operator/`](operator/) | Attention、GEMM、LayerNorm、RMSNorm、Softmax、HWC→CHW normalize | 算子逐版本优化 |
+| [`project/Shape-Adaptive-Fused-GEMM-Operator/`](project/Shape-Adaptive-Fused-GEMM-Operator/) | Shape-aware GEMM、Kernel Registry、Autotuner、SIMT/Tensor Core kernel family | Shape 驱动的 GEMM 选择与小型算子库原型 |
 | [`triton/`](triton/) | Elementwise、Norm、Softmax、普通/高优化 GEMM、benchmark 与汇编导出 | Triton 逐元素 kernel、行归约、Tensor Core 与编译结果观察 |
 | [`mini-triton/`](mini-triton/) | Python AST、IR、PTX、Tensor/Layout/Thread/Address/Register lowering | 教学型 GPU DSL 编译器 |
 | [`cutlass/`](cutlass/) | CUTLASS 学习规划 | 当前为空源码占位 |
@@ -67,6 +68,37 @@
 | HWC→CHW | layout conversion、uint8→FP32 和 normalization 融合 |
 
 这些版本常针对固定 hidden size、head dimension、tile 或 GPU 架构。修改 shape 前，应检查静态 shared memory、寄存器数组、尾块 mask 和向量对齐。
+
+### Shape-Adaptive Fused GEMM Operator
+
+[`project/Shape-Adaptive-Fused-GEMM-Operator/`](project/Shape-Adaptive-Fused-GEMM-Operator/) 用于研究不同矩阵 shape 与 CUDA GEMM kernel 配置之间的性能关系，并逐步建立由 benchmark 数据驱动的 kernel 选择机制。
+
+项目包含从基础实现到 V6 的连续演进：
+
+| 版本 | 入口 | 主要内容 |
+| --- | --- | --- |
+| 基础版本 | [`shape_adaptive_gemm/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm/README.md) | `small_m`、`regular`、`skinny_n` 三类 FP32 kernel，基于 shape 的规则分发，cuBLAS 正确性与性能基线，Bias、Bias + SiLU 融合，以及 shape sweep 脚本 |
+| V1 | [`shape_adaptive_gemm_v1/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v1/README.md) | 通用 GEMM kernel 模板、9 个 tile 配置、Kernel Registry、硬件约束过滤、离线 benchmark autotuner，以及最佳 kernel 与 cuBLAS 的正确性和 TFLOPS 对比 |
+| V2 | [`shape_adaptive_gemm_v2/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v2/README.md) | GPU/Compute Capability 感知的 tune cache、cache miss 自动调优、cache hit runtime dispatch、CSV 性能数据库和 NCU 单 kernel 采样模式 |
+| V3 | [`shape_adaptive_gemm_v3/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v3/README.md) | Scalar 与 `float4` 全局访存路径、对齐检查、成对注册和自动 A/B benchmark |
+| V4 | [`shape_adaptive_gemm_v4/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v4/README.md) | Global→Register 预取、双缓冲 shared memory 和面向 SM75 的软件流水线 |
+| V5 | [`shape_adaptive_gemm_v5/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v5/README.md) | 显式 warp-level tiling、shared-memory padding，以及 scalar/vec4/pipe/warp 路径自动选择 |
+| V6 | [`shape_adaptive_gemm_v6/`](project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm_v6/README.md) | FP32 SIMT 与 FP16 Tensor Core 双 kernel family、WMMA、half8 向量化加载和独立 Tensor Core autotuner |
+
+项目以 RTX 2080 / SM75 为主要目标平台。基础版本从手写 shape 阈值开始，V1–V5 逐步建立 FP32 SIMT kernel registry、性能缓存、向量化访存、软件流水和 warp tiling；V6 在同一套 library architecture 中加入 FP16 Tensor Core WMMA family。推荐按版本顺序理解 `Shape → Tile Configuration → GPU Resource Usage → Performance` 的关系。
+
+基础版本的典型运行方式：
+
+```bash
+cd project/Shape-Adaptive-Fused-GEMM-Operator/shape_adaptive_gemm
+mkdir -p build && cd build
+cmake ..
+cmake --build . -j
+./shape_gemm 128 4096 4096
+./shape_gemm 16 4096 4096 --all-kernels
+```
+
+各版本使用相同的 CMake 构建流程。运行时会根据版本打印 Kernel Registry、benchmark 合法配置、维护性能缓存并选择最佳 kernel，再与 cuBLAS 比较正确性和性能。具体接口、数据类型、profile 脚本和版本限制见各目录 README。
 
 ### Triton kernels
 
@@ -258,10 +290,11 @@ CUDA kernel 可用 CUDA Event 测量，Triton 可用 `triton.testing.do_bench`�
 5. [`cuda-kernel-samples/gemm/`](cuda-kernel-samples/gemm/)：从 naive 逐步学习 shared/register tiling 和 WMMA。
 6. [`operator/LayerNorm/`](operator/LayerNorm/)、[`operator/RMSNorm/`](operator/RMSNorm/)、[`operator/SoftMax/`](operator/SoftMax/)：进入归约型真实算子。
 7. [`operator/GEMM/`](operator/GEMM/) 与 [`operator/Attention/`](operator/Attention/)：研究更深入的分块、online softmax 和融合。
-8. [`cuda-operator-pytorch/simple/`](cuda-operator-pytorch/simple/)：理解 Python、C++ binding 和 CUDA kernel 的调用链。
-9. [`cuda-operator-pytorch/add/`](cuda-operator-pytorch/add/)：学习 dispatcher、autograd、FakeTensor 与 `torch.compile` 接入。
-10. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
-11. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
+8. [`project/Shape-Adaptive-Fused-GEMM-Operator/`](project/Shape-Adaptive-Fused-GEMM-Operator/)：从 shape-specific kernel、规则分发逐步进入 Kernel Registry 和 benchmark autotuner。
+9. [`cuda-operator-pytorch/simple/`](cuda-operator-pytorch/simple/)：理解 Python、C++ binding 和 CUDA kernel 的调用链。
+10. [`cuda-operator-pytorch/add/`](cuda-operator-pytorch/add/)：学习 dispatcher、autograd、FakeTensor 与 `torch.compile` 接入。
+11. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
+12. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
 
 ## 仓库状态与注意事项
 

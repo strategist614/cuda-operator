@@ -1,0 +1,2 @@
+gpu,cc_major,cc_minor,dtype,M,N,K,epilogue,kernel,latency_ms,tflops
+NVIDIA GeForce RTX 2080,7,5,fp16_tc,128,4096,4096,0,tc_m128_n64_k16_w64x32,0.329021454,13.0537606
