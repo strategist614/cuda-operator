@@ -1,6 +1,6 @@
 # Shape-Adaptive Fused GEMM Operator
 
-这是一个面向 CUDA 算子优化学习与实验的 Shape-Adaptive GEMM 项目。项目从多个固定 shape kernel 和简单规则分发开始，逐步加入 Kernel Registry、Autotuner、性能缓存、向量化访存、软件流水、warp-level tiling，以及 FP16 Tensor Core kernel family。
+这是一个面向 CUDA 算子优化学习与实验的 Shape-Adaptive GEMM 项目。项目从多个固定 shape kernel 和简单规则分发开始，逐步加入 Kernel Registry、Autotuner、性能缓存、向量化访存、软件流水、warp-level tiling、FP16 Tensor Core kernel family，以及 CTA 与 warp fragment 两级流水。
 
 项目关注的不只是实现矩阵乘法，而是研究：
 
@@ -18,6 +18,9 @@
 - Scalar、`float4` 和 `half8` 向量化访存路径。
 - Register prefetch、双缓冲 shared memory 和 SM75 软件流水。
 - Warp-level tiling 与 shared-memory padding。
+- Shared→WMMA fragment double buffering。
+- WMMA-compatible padded shared-memory layout。
+- SM75 native `mma.sync` 实验封装。
 - cuBLAS 正确性和性能基线。
 - Bias、Bias + SiLU 等融合 Epilogue 接口。
 - Shape sweep、单 kernel benchmark 和 NCU profile 脚本。
@@ -33,6 +36,7 @@
 | V4 | Global→Register 预取、双缓冲 shared memory 和面向 Turing/SM75 的软件流水 | [`shape_adaptive_gemm_v4/`](shape_adaptive_gemm_v4/README.md) |
 | V5 | 显式 warp-level tiling、shared-memory padding，以及 scalar/vec4/pipe/warp 路径对比 | [`shape_adaptive_gemm_v5/`](shape_adaptive_gemm_v5/README.md) |
 | V6 | FP32 SIMT 与 FP16 Tensor Core 双 kernel family、WMMA、`half8` 加载和 Tensor Core Autotuner | [`shape_adaptive_gemm_v6/`](shape_adaptive_gemm_v6/README.md) |
+| V7 | CTA pipeline 与 warp fragment pipeline 两级流水、fragment double buffering、WMMA-compatible padding、扩大后的 Tensor Core 配置空间和 SM75 native MMA 实验入口 | [`shape_adaptive_gemm_v7/`](shape_adaptive_gemm_v7/README.md) |
 
 整体演进路线：
 
@@ -57,6 +61,9 @@ Warp-Level Tiling + Shared-Memory Layout
         ↓
 V6
 FP32 SIMT + FP16 Tensor Core WMMA
+        ↓
+V7
+CTA Pipeline + Warp Fragment Pipeline
 ```
 
 ## 总体架构
@@ -93,7 +100,8 @@ Shape-Adaptive-Fused-GEMM-Operator/
 ├── shape_adaptive_gemm_v3/
 ├── shape_adaptive_gemm_v4/
 ├── shape_adaptive_gemm_v5/
-└── shape_adaptive_gemm_v6/
+├── shape_adaptive_gemm_v6/
+└── shape_adaptive_gemm_v7/
 ```
 
 各版本通常包含：
@@ -115,7 +123,7 @@ version/
 - CMake 3.20 或更高版本。
 - 支持 C++17 的主机编译器。
 
-项目主要面向 RTX 2080 / Turing / SM75。V4–V6 在 SM75 上使用软件预取和双缓冲，不依赖 `cp.async`。V6 的 FP16 路径需要支持 Tensor Core 和 WMMA。
+项目主要面向 RTX 2080 / Turing / SM75。V4–V7 在 SM75 上使用软件预取和双缓冲，不依赖 `cp.async`。V6–V7 的 FP16 路径需要支持 Tensor Core 和 WMMA；V7 还提供实验性的 SM75 native `mma.sync` 封装，但尚未将其作为默认 GEMM mainloop。
 
 检查环境：
 
@@ -146,30 +154,50 @@ cmake --build shape_adaptive_gemm/build -j
 ./shape_adaptive_gemm/build/shape_gemm 16 4096 4096 --all-kernels
 ```
 
-### 构建 V6
+### 构建当前版本 V7
 
 ```bash
-cmake -S shape_adaptive_gemm_v6 -B shape_adaptive_gemm_v6/build
-cmake --build shape_adaptive_gemm_v6/build -j
+cmake -S shape_adaptive_gemm_v7 -B shape_adaptive_gemm_v7/build
+cmake --build shape_adaptive_gemm_v7/build -j
 ```
 
 运行默认 FP16 Tensor Core 路径并重新调优：
 
 ```bash
-./shape_adaptive_gemm_v6/build/shape_gemm 128 4096 4096 --dtype fp16 --retune
+./shape_adaptive_gemm_v7/build/shape_gemm 128 4096 4096 --dtype fp16 --retune
 ```
 
 运行 FP32 SIMT 路径：
 
 ```bash
-./shape_adaptive_gemm_v6/build/shape_gemm 128 4096 4096 --dtype fp32 --retune
+./shape_adaptive_gemm_v7/build/shape_gemm 128 4096 4096 --dtype fp32 --retune
 ```
 
 查看可用 kernel：
 
 ```bash
-./shape_adaptive_gemm_v6/build/shape_gemm --dtype fp16 --list-kernels
-./shape_adaptive_gemm_v6/build/shape_gemm --dtype fp32 --list-kernels
+./shape_adaptive_gemm_v7/build/shape_gemm --dtype fp16 --list-kernels
+./shape_adaptive_gemm_v7/build/shape_gemm --dtype fp32 --list-kernels
+```
+
+对比 V6 baseline、V7 fragment pipeline 和 padded fragment pipeline：
+
+```bash
+./shape_adaptive_gemm_v7/build/shape_gemm 128 4096 4096 \
+  --dtype fp16 --kernel tcv6_m128_n64_k16_w64x32
+
+./shape_adaptive_gemm_v7/build/shape_gemm 128 4096 4096 \
+  --dtype fp16 --kernel tcv7_m128_n64_k16_w64x32_frag
+
+./shape_adaptive_gemm_v7/build/shape_gemm 128 4096 4096 \
+  --dtype fp16 --kernel tcv7_m128_n64_k16_w64x32_fp
+```
+
+使用 V7 提供的 NCU A/B 脚本：
+
+```bash
+(cd shape_adaptive_gemm_v7 && \
+  NCU=/usr/local/cuda/bin/ncu ./scripts/profile_v6_vs_v7.sh)
 ```
 
 每个版本的参数和支持能力不同，运行前请阅读对应目录的 README。
@@ -211,7 +239,7 @@ cache hit → 直接 dispatch 已缓存 kernel
 
 ## 推荐阅读顺序
 
-如果目标是理解优化过程，建议按基础版、V1、V2……V6 的顺序阅读。每个版本只引入一组主要变化，便于对比：
+如果目标是理解优化过程，建议按基础版、V1、V2……V7 的顺序阅读。每个版本只引入一组主要变化，便于对比：
 
 ```text
 shape 规则
@@ -221,9 +249,10 @@ shape 规则
 → 流水化
 → warp 映射
 → Tensor Core
+→ warp fragment 流水与 operand feeding
 ```
 
-如果只想查看当前能力，可以直接从 [`shape_adaptive_gemm_v6/README.md`](shape_adaptive_gemm_v6/README.md) 开始。
+如果只想查看当前能力，可以直接从 [`shape_adaptive_gemm_v7/README.md`](shape_adaptive_gemm_v7/README.md) 开始。
 
 ## 构建产物
 
