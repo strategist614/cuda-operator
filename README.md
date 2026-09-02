@@ -1,6 +1,6 @@
 # CUDA Operator Practice
 
-这是一个 CUDA、PyTorch Custom Operator、Triton 和 GPU 编译器学习仓库。内容从 CUDA 线程索引、访存、归约与矩阵转置开始，逐步扩展到 GEMM、归一化、Softmax、Attention、PyTorch C++/CUDA Extension、Triton kernel，以及一个用 Python 实现的教学型 Mini Triton 编译器。
+这是一个 CUDA、PyTorch Custom Operator、Triton 和 GPU 编译器学习仓库。内容从 CUDA 线程索引、访存、归约与矩阵转置开始，逐步扩展到 GEMM、Top-K、归一化、Softmax、Attention、PyTorch C++/CUDA Extension、Triton kernel，以及一个用 Python 实现的教学型 Mini Triton 编译器。
 
 仓库以学习记录和优化实验为主，不是统一构建、完整测试或生产部署的算子库。不同目录的完成度不同：既有能运行并验证结果的示例，也有编译器阶段实验、固定 shape 优化和仍不能编译的 kernel 草稿。
 
@@ -13,6 +13,7 @@
 | [`cuda-operator-pytorch/`](cuda-operator-pytorch/) | JIT Extension 与可安装的 dispatcher/custom op 示例 | PyTorch C++/CUDA 算子接入 |
 | [`operator/`](operator/) | Attention、GEMM、LayerNorm、RMSNorm、Softmax、HWC→CHW normalize | 算子逐版本优化 |
 | [`project/Shape-Adaptive-Fused-GEMM-Operator/`](project/Shape-Adaptive-Fused-GEMM-Operator/) | Shape-aware GEMM、Kernel Registry、Autotuner、SIMT/Tensor Core kernel family | Shape 驱动的 GEMM 选择与小型算子库原型 |
+| [`project/High-Performance-GPU-Top-K-Operator/`](project/High-Performance-GPU-Top-K-Operator/) | Exact Top-K、warp 协作选择、K 特化 kernel、Autotuner 与性能缓存 | 小 K 算法优化与 shape-aware runtime dispatch |
 | [`triton/`](triton/) | Elementwise、Norm、Softmax、普通/高优化 GEMM、benchmark 与汇编导出 | Triton 逐元素 kernel、行归约、Tensor Core 与编译结果观察 |
 | [`mini-triton/`](mini-triton/) | Python AST、IR、PTX、Tensor/Layout/Thread/Address/Register lowering | 教学型 GPU DSL 编译器 |
 | [`cutlass/`](cutlass/) | CUTLASS 学习规划 | 当前为空源码占位 |
@@ -99,6 +100,40 @@ cmake --build . -j
 ```
 
 各版本使用相同的 CMake 构建流程。运行时会根据版本打印 Kernel Registry、benchmark 合法配置、维护性能缓存并选择最佳 kernel，再与 cuBLAS 比较正确性和性能。具体接口、数据类型、profile 脚本和版本限制见各目录 README。
+
+### High-Performance GPU Top-K Operator
+
+[`project/High-Performance-GPU-Top-K-Operator/`](project/High-Performance-GPU-Top-K-Operator/) 面向 batched FP32 small-K 场景，输入为 `input[B, N]`，输出按 value 降序排列的 `top_values[B, K]` 和对应原始下标 `top_indices[B, K]`。当 value 相同时使用较小下标优先，保证结果确定；GPU 输出同时与 CPU `std::partial_sort` 的 value 和 index 对照验证。
+
+项目保留 V0–V5 的完整优化路径：
+
+| 版本 | 主要内容 |
+| --- | --- |
+| V0 | 单个 block 处理一行，仅 thread 0 重复扫描，建立 exact correctness 和 benchmark 基线 |
+| V1 | 256 threads 并行扫描、thread-local register Top-K、block-level merge |
+| V2 | warp shuffle 合并和 warp0 最终合并，减少 shared memory 与 block barrier |
+| V3 | warp-cooperative batch selection、threshold reject 和 bitonic merge |
+| V4 | 面向 `K=1/2/4/8/16` 的编译期特化 WarpSelect kernel family |
+| V5 | Kernel Registry、Autotuner、CSV Performance Cache 和 Runtime Dispatcher |
+
+当前推荐使用 V5。它支持 FP32、`1 <= K <= 16`，默认编译目标为 RTX 2080 / SM75；对于 `K=1/2/4/8/16`，autotuner 会比较通用 V3 与对应的 V4 特化 kernel，其他 `K <= 16` 使用 `batch_v3` 作为高性能 exact fallback。
+
+快速构建并自动调优：
+
+```bash
+cd project/High-Performance-GPU-Top-K-Operator/gpu_topk_v5
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+./build/topk_bench --list-kernels
+./build/topk_bench 128 65536 4 --retune
+./build/topk_bench 128 65536 4
+```
+
+第一次运行会 benchmark 兼容候选并把最优结果写入 `results/topk_cache_v5.csv`，再次运行相同 `(GPU, dtype, B, N, K)` 时直接命中缓存。仓库记录的 RTX 2080、FP32、`B=128, N=65536, K=16` 历史数据从 V0 的 `525.86 ms` 降至 V3 的 `0.475832 ms`；V4/V5 的最终选择会随 shape 和 K 改变，应在目标 GPU 上使用 `--retune` 重新测试。
+
+完整的问题定义、性能表、CLI 参数、sweep 和 NCU 使用方法见该项目的 [`README.md`](project/High-Performance-GPU-Top-K-Operator/README.md)。
 
 ### Triton kernels
 
@@ -291,10 +326,11 @@ CUDA kernel 可用 CUDA Event 测量，Triton 可用 `triton.testing.do_bench`�
 6. [`operator/LayerNorm/`](operator/LayerNorm/)、[`operator/RMSNorm/`](operator/RMSNorm/)、[`operator/SoftMax/`](operator/SoftMax/)：进入归约型真实算子。
 7. [`operator/GEMM/`](operator/GEMM/) 与 [`operator/Attention/`](operator/Attention/)：研究更深入的分块、online softmax 和融合。
 8. [`project/Shape-Adaptive-Fused-GEMM-Operator/`](project/Shape-Adaptive-Fused-GEMM-Operator/)：从 shape-specific kernel、规则分发逐步进入 Kernel Registry 和 benchmark autotuner。
-9. [`cuda-operator-pytorch/simple/`](cuda-operator-pytorch/simple/)：理解 Python、C++ binding 和 CUDA kernel 的调用链。
-10. [`cuda-operator-pytorch/add/`](cuda-operator-pytorch/add/)：学习 dispatcher、autograd、FakeTensor 与 `torch.compile` 接入。
-11. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
-12. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
+9. [`project/High-Performance-GPU-Top-K-Operator/`](project/High-Performance-GPU-Top-K-Operator/)：从串行 Top-K 基线进入 warp 协作选择、threshold pruning、K 特化和 shape-aware dispatch。
+10. [`cuda-operator-pytorch/simple/`](cuda-operator-pytorch/simple/)：理解 Python、C++ binding 和 CUDA kernel 的调用链。
+11. [`cuda-operator-pytorch/add/`](cuda-operator-pytorch/add/)：学习 dispatcher、autograd、FakeTensor 与 `torch.compile` 接入。
+12. [`triton/`](triton/)：用 block tensor 模型重新实现 elementwise kernel。
+13. [`mini-triton/`](mini-triton/)：从编译器角度理解 AST、IR、layout、thread 和 PTX。
 
 ## 仓库状态与注意事项
 
